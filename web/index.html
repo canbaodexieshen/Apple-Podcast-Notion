@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<!-- Controls, theme styles and iPad hover behavior adapted from canbaodexieshen/Read-notion. -->
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Apple Podcasts 播放记录热力图</title>
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            min-height: 100vh;
+            background-color: #ffffff;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+            overflow: hidden;
+            transition: background-color 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        header {
+            padding: 22px 15px 8px 15px;
+            display: flex;
+            justify-content: flex-end;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .controls-wrapper {
+            display: flex;
+            gap: 8px;
+            background: rgba(255, 255, 255, 0.85);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            padding: 5px 12px;
+            border-radius: 14px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.07);
+            border: 1px solid rgba(0, 0, 0, 0.06);
+            flex-wrap: wrap;
+        }
+
+        select, button {
+            padding: 4px 10px;
+            border-radius: 7px;
+            border: 1px solid #ddd;
+            background-color: #fff;
+            font-size: 12px;
+            color: #444;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            outline: none;
+            font-family: inherit;
+        }
+
+        select:hover, button:hover {
+            border-color: #bbb;
+            background-color: #f5f5f5;
+        }
+
+        #heatmap-scroll-container {
+            flex: 1;
+            overflow: auto;
+            display: flex;
+            justify-content: center;
+            align-items: flex-start;
+            padding: 8px 15px 20px 15px;
+        }
+
+        #heatmap-content {
+            width: 100%;
+            max-width: 1000px;
+        }
+
+        svg {
+            display: block;
+            width: 100%;
+            height: auto;
+            transition: filter 0.4s ease;
+        }
+
+        .loading-text {
+            color: #aaa;
+            font-size: 12px;
+            text-align: center;
+            margin-top: 50px;
+            letter-spacing: 0.02em;
+        }
+
+        /* ==================== 智能深色模式 ==================== */
+        /* 采用 keep2Notion 项目的智能反色滤镜策略：
+           保留绿色方块的色彩感知，同时让空白格正常显示 */
+
+        body.dark-mode {
+            background-color: #191919;
+        }
+
+        body.dark-mode .controls-wrapper {
+            background: rgba(35, 35, 35, 0.9);
+            border-color: rgba(255, 255, 255, 0.1);
+            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+        }
+
+        body.dark-mode select,
+        body.dark-mode button {
+            background-color: #2c2c2c;
+            color: #ccc;
+            border-color: #444;
+        }
+
+        body.dark-mode select:hover,
+        body.dark-mode button:hover {
+            background-color: #383838;
+        }
+
+        /* 智能反色滤镜：保留绿色方块的色彩感知，空白格正常显示 */
+        body.dark-mode svg {
+            filter: none;
+        }
+        body.dark-mode svg > rect:first-of-type { fill: #191919; }
+        body.dark-mode svg text { fill: #ccc; }
+        body.dark-mode svg rect[fill="#ebedf0"] { fill: #2c2c2c;
+        }
+
+        /* 图例说明 */
+        .legend {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-left: 10px;
+            font-size: 11px;
+            color: #888;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 3px;
+        }
+
+        .legend-box {
+            width: 10px;
+            height: 10px;
+            border-radius: 2px;
+        }
+
+        body.dark-mode .legend {
+            color: #888;
+        }
+
+        /* iPad mouse/trackpad fallback for the SVG's native title tooltip. */
+        .ipad-heatmap-tooltip {
+            position: fixed;
+            z-index: 200;
+            pointer-events: none;
+            max-width: calc(100vw - 16px);
+            padding: 5px 9px;
+            border: 1px solid #d4d4d4;
+            border-radius: 6px;
+            background: #fff;
+            color: #222;
+            font-size: 12px;
+            line-height: 1.4;
+            overflow-wrap: anywhere;
+        }
+
+        body.dark-mode .ipad-heatmap-tooltip {
+            background: #2c2c2c;
+            border-color: #555;
+            color: #eee;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="controls-wrapper">
+            <select id="year-select" aria-label="选择年份">
+                <option value="current">加载中...</option>
+            </select>
+            <button id="theme-toggle" title="切换深色/浅色模式">🌙</button>
+            <div class="legend" aria-label="进度记录数量颜色图例">
+                <span>少</span>
+                <div class="legend-item" title="较少记录"><div class="legend-box" style="background: #ace7ae;"></div></div>
+                <div class="legend-item" title="记录渐变"><div class="legend-box" style="background: #8bd08e;"></div></div>
+                <div class="legend-item" title="较多记录"><div class="legend-box" style="background: #69c16e;"></div></div>
+                <div class="legend-item" title="最多记录"><div class="legend-box" style="background: #549f57;"></div></div>
+                <span>多</span>
+            </div>     </div>
+    </header>
+
+    <div id="heatmap-scroll-container">
+        <div id="heatmap-content">
+            <p class="loading-text">正在加载播客热力图…</p>
+        </div>
+    </div>
+
+    <script>
+        const content     = document.getElementById('heatmap-content');
+        const yearSelect  = document.getElementById('year-select');
+        const themeToggle = document.getElementById('theme-toggle');
+
+        // iPadOS can report a desktop Mac user agent; do not rely on hover media
+        // queries, since touch remains the primary input even with a mouse.
+        const hideIPadTooltip = (() => {
+            const isIPad = /iPad/.test(navigator.userAgent) ||
+                (/Mac/.test(navigator.platform) && navigator.maxTouchPoints > 1);
+            if (!isIPad) return () => {};
+
+            let tooltip = null;
+            let activeCell = null;
+            const hide = () => {
+                activeCell = null;
+                if (tooltip) tooltip.hidden = true;
+            };
+            const show = event => {
+                if (event.pointerType !== 'mouse' || event.buttons !== 0) {
+                    hide();
+                    return;
+                }
+                const cell = event.target.closest('rect');
+                if (!cell || !content.contains(cell)) { hide(); return; }
+                if (cell === activeCell) return;
+                const title = cell.querySelector('title');
+                if (!title || !title.textContent.trim()) { hide(); return; }
+                if (!tooltip) {
+                    tooltip = document.createElement('div');
+                    tooltip.className = 'ipad-heatmap-tooltip';
+                    tooltip.setAttribute('role', 'tooltip');
+                    document.body.appendChild(tooltip);
+                }
+                activeCell = cell;
+                tooltip.textContent = title.textContent.trim();
+                tooltip.hidden = false;
+                tooltip.style.left = '0px';
+                tooltip.style.top = '0px';
+                const bounds = cell.getBoundingClientRect();
+                const width = tooltip.offsetWidth;
+                const height = tooltip.offsetHeight;
+                const viewport = document.documentElement;
+                const left = Math.max(8, Math.min(bounds.left + bounds.width / 2 - width / 2,
+                    viewport.clientWidth - width - 8));
+                const above = bounds.top - height - 8;
+                const top = Math.max(8, Math.min(above >= 8 ? above : bounds.bottom + 8,
+                    viewport.clientHeight - height - 8));
+                tooltip.style.left = `${left}px`;
+                tooltip.style.top = `${top}px`;
+            };
+            // Delegate to the container: no per-cell listeners, polling or images.
+            content.addEventListener('pointerover', show, { passive: true });
+            content.addEventListener('pointermove', show, { passive: true });
+            content.addEventListener('pointerout', event => {
+                if (!activeCell || !event.relatedTarget || !activeCell.contains(event.relatedTarget)) hide();
+            }, { passive: true });
+            document.addEventListener('pointerdown', hide, { passive: true });
+            document.addEventListener('scroll', hide, { capture: true, passive: true });
+            document.addEventListener('visibilitychange', hide);
+            window.addEventListener('blur', hide);
+            window.addEventListener('resize', hide);
+            return hide;
+        })();
+
+        let pendingRequest;
+        let currentYear;
+        const params = new URLSearchParams(location.search);
+        const initialImageUrl = params.get('image') || 'study_heatmap/main.svg';
+
+        async function loadHeatmap(url) {
+            if (pendingRequest) pendingRequest.abort();
+            const controller = new AbortController();
+            pendingRequest = controller;
+            hideIPadTooltip();
+            content.innerHTML = '<p class="loading-text">正在加载播放进度记录…</p>';
+            try {
+                const response = await fetch(url, {signal: controller.signal, cache: 'no-cache'});
+                if (!response.ok) throw new Error(`该年份尚无存档文件 (${response.status})`);
+                const xml = new DOMParser().parseFromString(await response.text(), 'image/svg+xml');
+                const svg = xml.documentElement;
+                if (svg.localName !== 'svg' || xml.querySelector('parsererror')) throw new Error('热力图文件无法解析');
+                svg.querySelectorAll('script, foreignObject').forEach(node => node.remove());
+                for (const element of [svg, ...svg.querySelectorAll('*')]) {
+                    for (const attribute of [...element.attributes]) {
+                        if (/^on/i.test(attribute.name) || (/href$/i.test(attribute.name) && !attribute.value.startsWith('#'))) element.removeAttribute(attribute.name);
+                    }
+                }
+                if (!controller.signal.aborted) content.replaceChildren(document.importNode(svg, true));
+            } catch (error) {
+                if (error.name === 'AbortError') return;
+                const message = document.createElement('p');
+                message.className = 'loading-text';
+                message.setAttribute('role', 'status');
+                message.textContent = error.message;
+                content.replaceChildren(message);
+            }
+        }
+
+        function showSelectedYear() {
+            const selected = yearSelect.value;
+            const file = selected === 'all' ? 'heatmap.svg'
+                : selected === 'current' ? initialImageUrl
+                : `old_heatmap/${selected}.svg`;
+            loadHeatmap(file);
+            const url = new URL(location.href);
+            url.searchParams.set('year', selected === 'current' ? String(currentYear) : selected);
+            history.replaceState(null, '', url);
+        }
+
+        yearSelect.disabled = true;
+        fetch('study_heatmap/years.json', {cache: 'no-cache'})
+            .then(response => {
+                if (!response.ok) throw new Error('年份清单加载失败');
+                return response.json();
+            })
+            .then(data => {
+                currentYear = data.current;
+                yearSelect.replaceChildren(...data.years.map(year =>
+                    new Option(String(year), year === currentYear ? 'current' : String(year))));
+                yearSelect.add(new Option('全部年份', 'all'));
+                const requested = params.get('year');
+                const selected = requested === String(currentYear) ? 'current' : requested;
+                yearSelect.value = [...yearSelect.options].some(option => option.value === selected) ? selected : 'current';
+                yearSelect.disabled = false;
+                showSelectedYear();
+            })
+            .catch(() => {
+                yearSelect.replaceChildren(new Option('当前年份', 'current'));
+                loadHeatmap(initialImageUrl);
+            });
+        yearSelect.addEventListener('change', showSelectedYear);
+
+        // ================= 智能主题切换逻辑 =================
+
+        function applyTheme(isDark) {
+            if (isDark) {
+                document.body.classList.add('dark-mode');
+                themeToggle.innerText = '☀️';
+            } else {
+                document.body.classList.remove('dark-mode');
+                themeToggle.innerText = '🌙';
+            }
+        }
+
+        // 1. 自动感应系统设置
+        const systemPrefersDark = window.matchMedia('(prefers-color-scheme: dark)');
+        // 兼容 Notion 嵌入：Notion 经常通过 URL 参数传递 theme=dark
+        let manualTheme = false;
+        const explicitTheme = params.get('theme');
+        const initialDark = explicitTheme === 'dark' || (explicitTheme !== 'light' && systemPrefersDark.matches);
+        applyTheme(initialDark);
+
+        // 2. 监听系统设置变化
+        systemPrefersDark.addEventListener('change', e => {
+            if (!manualTheme && !explicitTheme) applyTheme(e.matches);
+        });
+
+        // 3. 手动切换覆盖
+        themeToggle.addEventListener('click', () => {
+            const isCurrentlyDark = document.body.classList.contains('dark-mode');
+            manualTheme = true;
+            applyTheme(!isCurrentlyDark);
+            const url = new URL(location.href);
+            url.searchParams.set('theme', isCurrentlyDark ? 'light' : 'dark');
+            history.replaceState(null, '', url);
+        });
+    </script>
+</body>
+</html>

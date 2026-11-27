@@ -1,0 +1,51 @@
+name: Apple Podcasts sync
+on:
+  workflow_dispatch:
+    inputs:
+      check_only:
+        description: '只读检查 Apple 数据与 Notion 模板（首次运行建议勾选）'
+        type: boolean
+        default: true
+      skip_ai:
+        description: '仅同步资料和进度，跳过转写与脑图'
+        type: boolean
+        default: false
+  schedule:
+    - cron: '0 17 * * *'
+permissions:
+  contents: read
+concurrency:
+  group: apple-podcasts-sync
+  cancel-in-progress: false
+jobs:
+  sync:
+    if: github.event_name == 'workflow_dispatch' || vars.SYNC_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      APPLE_BEARER_TOKEN: ${{ secrets.APPLE_BEARER_TOKEN }}
+      APPLE_MEDIA_USER_TOKEN: ${{ secrets.APPLE_MEDIA_USER_TOKEN }}
+      NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+      NOTION_PAGE: ${{ secrets.NOTION_PAGE }}
+      SILICONFLOW_API_KEY: ${{ secrets.SILICONFLOW_API_KEY }}
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      DEEPSEEK_MODEL: ${{ vars.DEEPSEEK_MODEL || 'deepseek-flash' }}
+      AI_MAX_EPISODES: ${{ vars.AI_MAX_EPISODES || '3' }}
+      CHECK_ONLY: ${{ inputs.check_only && '1' || '0' }}
+      SKIP_AI: ${{ inputs.skip_ai && '1' || '0' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Install audio tools
+        run: sudo apt-get update -qq && sudo apt-get install -y ffmpeg
+      - name: Sync
+        shell: bash
+        run: |
+          args=()
+          if [ "$CHECK_ONLY" = "1" ]; then args+=(--check); fi
+          if [ "$SKIP_AI" = "1" ]; then args+=(--no-ai); fi
+          python -u scripts/sync.py "${args[@]}"
