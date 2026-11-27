@@ -84,8 +84,30 @@ class RecordTests(unittest.TestCase):
                 result=n.index(db,key)
                 self.assertEqual(list(result),['apple:1000675890293'])
                 self.assertEqual(result['apple:1000675890293']['id'],'new')
-                self.assertEqual(n.paginate.call_args.args[1],
-                    {'filter':{'property':key,'rich_text':{'starts_with':'apple:'}}})
+                query=n.paginate.call_args.args[1]['filter']
+                self.assertEqual(query.get('or',[query])[0],
+                    {'property':key,'rich_text':{'starts_with':'apple:'}})
+
+    @patch('sync.podcast_aliases',return_value={'123':'legacy-show'})
+    def test_alias_resolves_to_canonical_page(self,aliases):
+        n=object.__new__(sync.Notion);n.dbs={'Podcast':'database'}
+        canonical={'id':'original','properties':{'Pid':{'type':'rich_text','rich_text':[{'plain_text':'legacy-show'}]}}}
+        n.paginate=Mock(return_value=iter([canonical]))
+        self.assertEqual(n.index('Podcast','Pid'),{'apple:123':canonical})
+
+    def test_merged_show_keeps_legacy_id_link_description_and_authors(self):
+        n=FakeNotion()
+        canonical={'id':'original','properties':{
+            'Pid':{'type':'rich_text','rich_text':[{'plain_text':'legacy-show'}]},
+            '播客':{'type':'title','title':[{'plain_text':'原节目名称'}]}}}
+        n.index=lambda db,key: {'apple:123':canonical} if db=='Podcast' else {}
+        sync.sync_records(n,{'123':{'attributes':{'name':'新名称','artistName':'新发布者',
+            'description':{'standard':'新简介'},'url':'https://example.test'}}},{},set())
+        properties=n.calls[0][2]
+        self.assertEqual(properties['Pid']['rich_text'][0]['text']['content'],'legacy-show')
+        for field in ('链接','Description','作者'):
+            self.assertNotIn(field,properties)
+        self.assertFalse(any(db=='Author' for db,key,props in n.calls))
 
     def test_index_still_rejects_duplicate_apple_ids(self):
         n=object.__new__(sync.Notion);n.dbs={'Episode':'database'}

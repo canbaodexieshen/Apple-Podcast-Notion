@@ -173,6 +173,15 @@ def text_value(page, name):
     return ''.join(x.get('plain_text', x.get('text', {}).get('content', '')) for x in p.get(p.get('type', 'rich_text'), []) or [])
 
 
+def podcast_aliases():
+    """Public Apple catalog ID -> existing Xiaoyuzhou ID; no private page IDs."""
+    path=Path(__file__).resolve().parents[1]/'config/podcast_aliases.json'
+    aliases=json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
+    if len(set(aliases.values())) != len(aliases):
+        raise ValueError('Ambiguous podcast aliases')
+    return aliases
+
+
 class Notion:
     def __init__(self):
         self.headers = {'Authorization': 'Bearer ' + required('NOTION_TOKEN'), 'Notion-Version': '2022-06-28'}
@@ -307,17 +316,23 @@ class Notion:
         result = {}
         apple_only = (db, key) in (('Podcast', 'Pid'), ('Episode', 'Eid'))
         query = {'filter': {'property': key, 'rich_text': {'starts_with': 'apple:'}}} if apple_only else {}
+        aliases=podcast_aliases() if db=='Podcast' and key=='Pid' else {}
+        reverse={legacy:'apple:'+apple for apple,legacy in aliases.items()}
+        if reverse:
+            query={'filter':{'or':[query['filter']]+[
+                {'property':key,'rich_text':{'equals':legacy}} for legacy in reverse]}}
         for page in self.paginate('databases/'+self.dbs[db]+'/query', query):
             value = text_value(page, key)
             # Duplicate legacy IDs belong to the old source. Never reconcile,
             # update or reject those records during an Apple sync. Also check
             # locally so source isolation does not depend solely on the filter.
-            if apple_only and not value.startswith('apple:'):
+            if apple_only and not value.startswith('apple:') and value not in reverse:
                 continue
-            if value in result and value:
-                raise ValueError(f'Duplicate {db}.{key}: {value}')
-            if value:
-                result[value] = page
+            identity=reverse.get(value,value)
+            if identity in result and identity:
+                raise ValueError(f'Duplicate {db}.{key}: {identity}; reconcile source aliases before syncing')
+            if identity:
+                result[identity] = page
         return result
 
     def upsert(self, db, index, key, properties):
@@ -350,17 +365,21 @@ def sync_records(notion, shows, episodes, saved):
     for sid, show in shows.items():
         a = show.get('attributes', {})
         name = a.get('name') or 'Apple Podcasts ' + sid
-        props = {'播客':prop('title',name), 'Pid':prop('rich_text','apple:'+sid),
-                 '链接':prop('url',a.get('url') or 'https://podcasts.apple.com/cn/podcast/id'+sid)}
+        old=podcasts.get('apple:'+sid,{})
+        legacy=bool(old and not text_value(old,'Pid').startswith('apple:'))
+        props = {'播客':prop('title',text_value(old,'播客') if legacy else name),
+                 'Pid':prop('rich_text',text_value(old,'Pid') if legacy else 'apple:'+sid)}
+        if not legacy:
+            props['链接']=prop('url',a.get('url') or 'https://podcasts.apple.com/cn/podcast/id'+sid)
         if notion.schemas['Podcast'].get('来源', {}).get('type') == 'rich_text':
             props['来源'] = prop('rich_text','Apple Podcasts')
-        if a.get('artistName'):
+        if a.get('artistName') and not legacy:
             author = a['artistName']
             author_page = authors.get(author) or notion.upsert('Author',authors,author,{'标题':prop('title',author)})
             props['作者'] = prop('relation',[{'id':author_page['id']}])
             if not author_page.get('icon'):
                 notion.call('PATCH','pages/'+author_page['id'],{'icon':{'type':'emoji','emoji':'🎙️'}})
-        if a.get('description',{}).get('standard'):
+        if a.get('description',{}).get('standard') and not legacy:
             props['Description'] = prop('rich_text',a['description']['standard'][:1800])
         page = notion.upsert('Podcast',podcasts,'apple:'+sid,props)
         show_pages[sid] = page['id']
