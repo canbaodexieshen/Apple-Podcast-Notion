@@ -1,21 +1,20 @@
 """Read back every migrated Apple episode and related metadata."""
 from sync import Notion, safe_error
 from presentation import children, plain, TAB_NAMES, library_outline
-from mindmap_library import outline_tree, heading_kind
+from mindmap_library import outline_tree, heading_kind, flat_outline, ordinary_heading
 from urllib.parse import urlsplit
 
 
-def verify_headings(notion,parent,nodes):
-    blocks=children(notion,parent)
-    if len(blocks)!=len(nodes):raise ValueError('Mindmap heading count differs from saved HTML')
-    for block,node in zip(blocks,nodes):
-        kind=heading_kind(node)
-        if block['type']!=kind or not block[kind].get('is_toggleable') or plain(block)!=node['label']:
-            raise ValueError('Mindmap requires native toggleable heading levels')
-        if node['children']:
-            verify_headings(notion,block['id'],node['children'])
-        elif block.get('has_children'):
-            raise ValueError('Unexpected nested mindmap content')
+def verify_plain_headings(notion,page,diagram,title,nodes):
+    blocks=children(notion,page)
+    start=next(i+1 for i,b in enumerate(blocks) if b['id']==diagram['id'])
+    expected=flat_outline(title,nodes)
+    actual=blocks[start:start+len(expected)]
+    if len(actual)!=len(expected) or not all(ordinary_heading(b,node) for b,node in zip(actual,expected)):
+        raise ValueError('Mindmap requires ordinary native heading levels in Markdown order')
+    known={(heading_kind(node),node['label']) for node in expected}
+    if any((b['type'],plain(b)) in known for b in blocks[start+len(expected):]):
+        raise ValueError('Duplicate generated headings remain')
 
 
 def main():
@@ -67,14 +66,14 @@ def main():
         blocks=children(n,record['id'])
         if len(blocks)<2 or [b['type'] for b in blocks[:2]]!=['heading_2','heading_1']:
             raise ValueError('Mindmap body hierarchy mismatch')
-        if plain(blocks[0])!='脑图' or not all(b[b['type']].get('is_toggleable') for b in blocks[:2]):
-            raise ValueError('Mindmap headings are not toggleable')
+        if plain(blocks[0])!='脑图' or not blocks[0]['heading_2'].get('is_toggleable'):
+            raise ValueError('Mindmap HTML heading must remain toggleable')
         if not any(b['type']=='embed' for b in children(n,blocks[0]['id'])):
             raise ValueError('Mindmap HTML missing')
         outline=library_outline(n,record)
         title,nodes=outline_tree(outline)
         if plain(blocks[1])!=title:raise ValueError('Mindmap title differs from saved HTML')
-        verify_headings(n,blocks[1]['id'],nodes)
+        verify_plain_headings(n,record['id'],blocks[0],title,nodes)
         episode_blocks=brains.get(relations[0]['id'],[])
         index=next((i for i,b in enumerate(episode_blocks) if b['type']=='embed'),None)
         if index is None or index+1>=len(episode_blocks):raise ValueError('Episode mindmap mention missing')

@@ -71,35 +71,72 @@ def outline_tree(markdown):
     return title,nodes
 
 
-def append_tree(notion,parent,nodes):
-    if not nodes:return
-    # Submit one level per call, so the API's nested-block limit is never exceeded.
-    for start in range(0,len(nodes),100):
-        batch=nodes[start:start+100]
-        blocks=[{'object':'block','type':heading_kind(node),heading_kind(node):{
-            'rich_text':rich(node['label']),'is_toggleable':True}} for node in batch]
-        result=notion.call('PATCH','blocks/'+parent+'/children',{'children':blocks})['results']
-        for block,node in zip(result,batch):append_tree(notion,block['id'],node['children'])
-
-
-def tree_prefix(notion,parent,nodes):
-    from presentation import children, plain
-    existing=children(notion,parent)
-    return len(existing)<=len(nodes) and all(
-        block['type']==heading_kind(node) and block[block['type']].get('is_toggleable') and plain(block)==node['label'] and
-        tree_prefix(notion,block['id'],node['children'])
-        for block,node in zip(existing,nodes))
-
-
-def resume_tree(notion,parent,nodes):
-    from presentation import children
-    existing=children(notion,parent)
-    for block,node in zip(existing,nodes):resume_tree(notion,block['id'],node['children'])
-    append_tree(notion,parent,nodes[len(existing):])
-
-
 def heading_kind(node):
     return 'heading_'+str(min(4,node['level']))
+
+
+def flat_outline(title,nodes):
+    result=[{'label':title,'level':1}]
+    def visit(items):
+        for node in items:
+            result.append({'label':node['label'],'level':min(4,node['level'])})
+            visit(node['children'])
+    visit(nodes)
+    return result
+
+
+def ordinary_heading(block,node):
+    from presentation import plain
+    kind=heading_kind(node)
+    return (block['type']==kind and plain(block)==node['label'] and
+            not block[kind].get('is_toggleable') and not block.get('has_children'))
+
+
+def ensure_plain_outline(notion,page,diagram,title,nodes):
+    """Preserve ordinary headings and notes; migrate only verified generated content."""
+    from collections import Counter
+    from presentation import children, plain
+    desired=flat_outline(title,nodes)
+    expected=[(heading_kind(node),node['label']) for node in desired]
+    known=set(expected)
+    roots=children(notion,page)
+    start=next(i+1 for i,b in enumerate(roots) if b['id']==diagram['id'])
+    prefix=[]
+    for block,node in zip(roots[start:],desired):
+        if not ordinary_heading(block,node):break
+        prefix.append(block)
+    prefix_ids={b['id'] for b in prefix}
+    old=[b for b in roots if b['id']!=diagram['id'] and b['id'] not in prefix_ids and
+         (b['type'],plain(b)) in known]
+    def tokens(block):
+        kind=block['type'];label=plain(block)
+        if kind=='paragraph' and not label.strip() and not block.get('has_children'):return []
+        if (kind,label) not in known:
+            raise ValueError('Additional notes inside generated headings; originals preserved')
+        result=[(kind,label)]
+        if block.get('has_children') or block[kind].get('is_toggleable'):
+            for child in children(notion,block['id']):result+=tokens(child)
+        return result
+    original=[item for block in old for item in tokens(block)]
+    if len(prefix)==len(desired):
+        if Counter(original)-Counter(expected):
+            raise ValueError('Unmatched heading content; originals preserved')
+    elif original and original not in (expected,expected[len(prefix):]):
+        raise ValueError('Generated heading text differs from HTML; originals preserved')
+    cursor=prefix[-1]['id'] if prefix else diagram['id']
+    canonical=list(prefix)
+    for offset in range(len(prefix),len(desired),100):
+        batch=desired[offset:offset+100]
+        result=notion.call('PATCH','blocks/'+page+'/children',{'children':[
+            {'object':'block','type':heading_kind(node),heading_kind(node):{
+                'rich_text':rich(node['label']),'is_toggleable':False}} for node in batch],
+            'position':{'type':'after_block','after_block':{'id':cursor}}})['results']
+        canonical.extend(result);cursor=result[-1]['id']
+    # Recheck source blocks after saving the new layout; preserve concurrent notes.
+    if [item for block in old for item in tokens(notion.call('GET','blocks/'+block['id']))]!=original:
+        raise ValueError('Heading text changed during migration; originals preserved')
+    for block in old:notion.call('DELETE','blocks/'+block['id'])
+    return canonical
 
 
 def retire_markdown_property(notion):
@@ -123,7 +160,7 @@ def publish(notion,episode,outline,html_block=None):
     from presentation import markup, upload_html, children, plain, replace_tab
     from render_mindmap import screenshot
     title,nodes=outline_tree(outline)
-    content_hash=hashlib.sha256(('library-v2-headings|'+outline).encode()).hexdigest()
+    content_hash=hashlib.sha256(('library-v3-plain-headings|'+outline).encode()).hexdigest()
     record=lookup(notion,episode)
     print('Mindmap library: rendering complete outline and saving private PNG',flush=True)
     # Capture the full expanded map on every sync, even when the AI outline is unchanged.
@@ -139,7 +176,6 @@ def publish(notion,episode,outline,html_block=None):
     notion._map_records[episode.replace('-','')]=record
     old=children(notion,record['id'])
     diagram=next((b for b in old if b['type']=='heading_2' and plain(b)=='脑图'),None)
-    summary=next((b for b in old if b['type']=='heading_1'),None)
     if diagram is None:
         block=html_block or upload_html(notion,outline)
         diagram=notion.call('PATCH','blocks/'+record['id']+'/children',{'children':[{
@@ -149,15 +185,7 @@ def publish(notion,episode,outline,html_block=None):
         replace_tab(notion,diagram,[html_block])
     elif text_value(record,'内容指纹')!=content_hash:
         replace_tab(notion,diagram,[upload_html(notion,outline)])
-    if not summary or text_value(record,'内容指纹')!=content_hash:
-        pending=next((b for b in reversed(old) if b['type']=='heading_1' and plain(b)==title
-                      and tree_prefix(notion,b['id'],nodes)),None)
-        new=pending or notion.call('PATCH','blocks/'+record['id']+'/children',{'children':[{
-            'object':'block','type':'heading_1','heading_1':{'rich_text':rich(title),'is_toggleable':True}}],
-            'position':{'type':'after_block','after_block':{'id':diagram['id']}}})['results'][0]
-        resume_tree(notion,new['id'],nodes)
-        # Only retire the old generated section after every level was saved.
-        if summary and summary['id']!=new['id']:notion.call('DELETE','blocks/'+summary['id'])
+    ensure_plain_outline(notion,record['id'],diagram,title,nodes)
     record=notion.call('PATCH','pages/'+record['id'],{'properties':{'内容指纹':prop('rich_text',content_hash)}})
     notion._map_records[episode.replace('-','')]=record
     print(f'Mindmap library: {bounds["nodes"]} expanded nodes, {bounds["width"]}x{bounds["height"]} PNG saved',flush=True)

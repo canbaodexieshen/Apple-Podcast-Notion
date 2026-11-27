@@ -37,3 +37,6 @@ jobs:
       - name: Migrate content and correct metadata
         run: python -u scripts/upgrade_library.py
       - run: python -u scripts/verify_layout.py
+      - name: Repeat ordinary heading migration without AI
+        run: python -u scripts/upgrade_library.py
+      - run: python -u scripts/verify_layout.py

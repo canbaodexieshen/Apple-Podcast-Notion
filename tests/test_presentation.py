@@ -29,6 +29,7 @@ class MemoryNotion:
         return iter(self.contents[path.split('/')[1]])
     def call(self,method,path,body=None):
         id=path.split('/')[1]
+        if method=='GET':return copy.deepcopy(self.nodes[id])
         if method=='DELETE':
             for contents in self.contents.values():contents[:]=[b for b in contents if b['id']!=id]
             return {}

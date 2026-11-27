@@ -72,14 +72,19 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(title,'标题')
         self.assertEqual(nodes[0]['children'][0]['label'],'深层')
         self.assertEqual(nodes[1]['label'],'二')
-    def test_interrupted_tree_resumes_without_duplicates(self):
+    def test_partial_manual_conversion_preserves_ids_and_notes(self):
         n=MemoryNotion();_,nodes=lib.outline_tree('# 总结\n## 一\n### 子\n## 二')
-        n.add('root',{'type':'heading_2','heading_2':{'rich_text':rich('一'),'is_toggleable':True}})
-        self.assertTrue(lib.tree_prefix(n,'root',nodes))
-        lib.resume_tree(n,'root',nodes)
-        lib.resume_tree(n,'root',nodes)
-        self.assertEqual([presentation.plain(b) for b in n.contents['root']],['一','二'])
-        self.assertEqual(len(n.contents[n.contents['root'][0]['id']]),1)
+        diagram=n.add('root',{'type':'heading_2','heading_2':{'rich_text':rich('脑图'),'is_toggleable':True}})
+        title=n.add('root',{'type':'heading_1','heading_1':{'rich_text':rich('总结'),'is_toggleable':False}})
+        n.add('root',{'type':'heading_2','heading_2':{'rich_text':rich('一'),'is_toggleable':True,'children':[
+            {'type':'heading_3','heading_3':{'rich_text':rich('子'),'is_toggleable':True,'children':[
+                presentation.text_block('')]}}]}})
+        n.add('root',{'type':'heading_2','heading_2':{'rich_text':rich('二'),'is_toggleable':True}})
+        n.add('root',presentation.text_block('我的个人笔记'))
+        for _ in range(2):lib.ensure_plain_outline(n,'root',diagram,'总结',nodes)
+        self.assertEqual([presentation.plain(b) for b in n.contents['root']],['脑图','总结','一','子','二','我的个人笔记'])
+        self.assertEqual(n.contents['root'][1]['id'],title['id'])
+        self.assertTrue(all(not b[b['type']].get('is_toggleable') for b in n.contents['root'][1:5]))
     @patch('presentation.upload_html',return_value={'type':'embed','embed':{'type':'file_upload','file_upload':{'id':'html'}}})
     @patch('mindmap_library.upload_png',return_value={'type':'file_upload','file_upload':{'id':'png'}})
     @patch('render_mindmap.screenshot',return_value=(b'png',{'nodes':2,'width':100,'height':100}))
@@ -93,13 +98,14 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(record['properties']['思维导图封面']['files'][0]['file_upload']['id'],'png')
         self.assertEqual(record['properties']['播客单集']['relation'],[{'id':'episode'}])
         blocks=n.contents[record['id']]
-        self.assertEqual([b['type'] for b in blocks],['heading_2','heading_1'])
-        self.assertEqual([presentation.plain(b) for b in blocks],['脑图','AI大标题'])
-        self.assertTrue(all(b[b['type']]['is_toggleable'] for b in blocks))
+        self.assertEqual([b['type'] for b in blocks],['heading_2','heading_1','heading_2'])
+        self.assertEqual([presentation.plain(b) for b in blocks],['脑图','AI大标题','分支'])
+        self.assertTrue(blocks[0]['heading_2']['is_toggleable'])
+        self.assertTrue(all(not b[b['type']]['is_toggleable'] for b in blocks[1:]))
         self.assertEqual(html.call_count,1)
-        branch=n.contents[blocks[1]['id']][0]
+        branch=blocks[2]
         self.assertEqual(branch['type'],'heading_2')
-        self.assertTrue(branch['heading_2']['is_toggleable'])
+        self.assertFalse(branch['heading_2']['is_toggleable'])
         self.assertNotIn('脑图Markdown',record['properties'])
     def test_markdown_property_is_kept_if_html_cannot_recover_it(self):
         n=Mock();n.dbs={'思维导图':'maps','Episode':'episodes'}
@@ -123,13 +129,21 @@ class LibraryTests(unittest.TestCase):
         self.assertNotIn('脑图Markdown',record['properties'])
     def test_heading_levels_are_preserved_including_fourth_level(self):
         n=MemoryNotion();_,nodes=lib.outline_tree('# 总结\n## 二级\n### 三级\n#### 四级')
-        lib.append_tree(n,'root',nodes)
-        parent='root'
-        for level in (2,3,4):
-            block=n.contents[parent][0]
+        diagram=n.add('root',{'type':'heading_2','heading_2':{'rich_text':rich('脑图'),'is_toggleable':True}})
+        lib.ensure_plain_outline(n,'root',diagram,'总结',nodes)
+        for block,level in zip(n.contents['root'][1:],(1,2,3,4)):
             self.assertEqual(block['type'],'heading_'+str(level))
-            self.assertTrue(block[block['type']]['is_toggleable'])
-            parent=block['id']
+            self.assertFalse(block[block['type']]['is_toggleable'])
+            self.assertEqual(n.contents[block['id']],[])
+    def test_notes_inside_old_generated_section_are_never_discarded(self):
+        n=MemoryNotion();_,nodes=lib.outline_tree('# 总结\n## 一')
+        diagram=n.add('root',{'type':'heading_2','heading_2':{'rich_text':rich('脑图'),'is_toggleable':True}})
+        n.add('root',{'type':'heading_1','heading_1':{'rich_text':rich('总结'),'is_toggleable':True,'children':[
+            presentation.text_block('我的额外笔记')]}})
+        with patch.object(n,'call',wraps=n.call) as call:
+            with self.assertRaisesRegex(ValueError,'Additional notes'):
+                lib.ensure_plain_outline(n,'root',diagram,'总结',nodes)
+        call.assert_not_called()
 
 
 class RealRendererTests(unittest.TestCase):
