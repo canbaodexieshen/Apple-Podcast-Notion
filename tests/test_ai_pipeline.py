@@ -39,6 +39,26 @@ class AIStateTests(unittest.TestCase):
 
 class NewOutlineTests(unittest.TestCase):
     @patch('sync.requests.post')
+    def test_fenced_markdown_lists_and_paragraphs_keep_all_points(self,post):
+        raw='```markdown\n# 总结\n## 分支\n- 事实一\n  - 细节一\n  - 细节二\n- 事实二\n\n## 第二分支\n段落中的事实\n同段的补充\n```'
+        expected='# 总结\n## 分支\n### 事实一\n#### 细节一\n#### 细节二\n### 事实二\n## 第二分支\n### 段落中的事实 同段的补充'
+        post.return_value=Mock(ok=True,json=lambda:{'choices':[{'finish_reason':'stop','message':{'content':raw}}]})
+        self.assertEqual(sync.deepseek('逐字稿','key'),expected)
+        self.assertEqual(post.call_count,1)
+    def test_normalization_does_not_flatten_excessive_depth_or_drop_preamble(self):
+        for raw in ('# 总结\n## 分支\n- 要点\n  - 细节\n    - 太深',
+                '# 总结\n## 分支\n### 要点\n#### 细节\n##### 太深',
+                '开场说明\n# 总结\n## 分支\n### 要点',
+                '```markdown\n# 总结\n## 分支\n### 要点'):
+            with self.subTest(raw=raw),self.assertRaises(ValueError):
+                sync.validate_new_outline(sync.normalize_new_outline(raw))
+    def test_level_four_paragraphs_and_list_continuations_are_preserved(self):
+        raw='# 总结\n## 分支\n### 要点\n#### 细节\n细节补充\n\n## 另一分支\n1. 事实\n   事实续行'
+        result=sync.normalize_new_outline(raw)
+        sync.validate_new_outline(result)
+        self.assertIn('#### 细节 细节补充',result)
+        self.assertIn('### 事实 事实续行',result)
+    @patch('sync.requests.post')
     def test_large_outline_is_preserved_without_format_retry(self,post):
         outline='# 总结\n## 分支\n'+'\n'.join(f'### 事实{i}' for i in range(100))
         post.return_value=Mock(ok=True,json=lambda:{'choices':[{'finish_reason':'stop','message':{'content':outline}}]})
@@ -58,6 +78,7 @@ class NewOutlineTests(unittest.TestCase):
         post.side_effect=[response('# 总结\n## 太浅'),response('# 总结\n## 分支\n### 事实')]
         self.assertEqual(sync.deepseek('逐字稿','key'),'# 总结\n## 分支\n### 事实')
         self.assertEqual(post.call_count,2)
+        self.assertIn('<outline_to_correct>\n# 总结\n## 太浅',post.call_args.kwargs['json']['messages'][1]['content'])
         post.side_effect=[response('# 总结\n## 太浅'),response('# 总结\n## 仍浅')]
         with self.assertRaises(ValueError):sync.deepseek('逐字稿','key')
         self.assertEqual(post.call_count,4)

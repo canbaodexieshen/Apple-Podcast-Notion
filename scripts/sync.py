@@ -532,16 +532,67 @@ def deepseek(text, key):
     if len(chunks)>1:
         chunks = [completion(c,'根据播客逐字稿提炼中文要点，保留事实、分歧与关键数字，不补充外部知识。') for c in chunks]
     source='\n\n'.join(chunks)
-    instruction='将播客内容整理为中文Markdown大纲。唯一的#总标题为第一层；##主要分支为第二层，每个分支必须有###具体要点第三层，必要时用####第四层。所有叶节点必须在第三或第四层，不跳级，不超过四层。只输出标题行；忠于原文，不编造。'
+    instruction='将播客内容整理为中文Markdown大纲。唯一的#总标题为第一层；##主要分支为第二层，每个分支必须有###具体要点第三层，必要时用####第四层。所有叶节点必须在第三或第四层，不跳级，不超过四层。每行必须是#、##、###或####加空格及标题，不使用代码围栏、列表符号、正文段落或开场说明；忠于原文，不编造。'
+    content=source
     for attempt in range(2):
-        output=completion(source,instruction)
+        output=completion(content,instruction)
         try:
+            output=normalize_new_outline(output)
             validate_new_outline(output)
             return output
         except ValueError as error:
             if attempt:raise
-            print('DeepSeek: invalid outline hierarchy; one format correction requested',flush=True)
-            instruction+=' 上次层级不合格：'+str(error)+'。请严格修正。'
+            print(f'DeepSeek: invalid outline format ({error}); one format correction requested',flush=True)
+            instruction+=' 上次格式不合格：'+str(error)+'。请根据逐字稿修正所附大纲，保留事实，不丢弃要点。'
+            content=source+'\n\n<outline_to_correct>\n'+output+'\n</outline_to_correct>'
+
+
+def normalize_new_outline(markdown):
+    """Convert common Markdown wrappers/lists to headings without dropping content.
+
+    Explicit heading depths are never clamped. List nesting beyond level four
+    still fails validation, rather than silently flattening model output.
+    """
+    lines=markdown.strip().lstrip('\ufeff').splitlines()
+    if lines and re.fullmatch(r'(`{3,}|~{3,})(?:markdown|md)?\s*',lines[0].strip(),re.I):
+        fence=re.match(r'(`{3,}|~{3,})',lines[0].strip())[1]
+        if len(lines)<2 or lines[-1].strip()!=fence:
+            raise ValueError('Unclosed Markdown code fence')
+        lines=lines[1:-1]
+    nodes=[];base=0;stack=[];paragraph=None
+    for number,line in enumerate(lines,1):
+        stripped=line.strip()
+        if not stripped:
+            paragraph=None
+            continue
+        heading=re.fullmatch(r'(#+)\s+(.+)',stripped)
+        if heading:
+            base=len(heading[1]);stack=[];paragraph=None
+            nodes.append([base,heading[2]])
+            continue
+        item=re.fullmatch(r'(\s*)(?:[-+*]|\d+[.)])\s+(.+)',line)
+        if item and base:
+            indent=len(item[1].expandtabs(4))
+            while stack and indent<=stack[-1][0]:stack.pop()
+            level=(stack[-1][1] if stack else base)+1
+            stack.append((indent,level));paragraph=None
+            nodes.append([level,item[2]])
+            continue
+        if not base or re.match(r'^(?:#{1,}|`{3,}|~{3,}|\|)',stripped):
+            raise ValueError(f'Unsupported Markdown format at line {number}; expected heading or text under a heading')
+        if stack and line[:1].isspace():
+            nodes[-1][1]+=' '+stripped
+        elif paragraph is not None:
+            nodes[paragraph][1]+=' '+stripped
+        else:
+            stack=[]
+            # A paragraph below level four continues that leaf, without a
+            # fifth-level node. Other paragraphs become child headings.
+            if base==4:
+                nodes[-1][1]+=' '+stripped
+            else:
+                nodes.append([base+1,stripped]);paragraph=len(nodes)-1
+    return '\n'.join('#'*level+' '+label for level,label in nodes)
 
 
 def validate_new_outline(markdown):
