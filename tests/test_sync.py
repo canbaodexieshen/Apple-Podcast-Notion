@@ -57,6 +57,7 @@ class FakeNotion:
     def __init__(self,old=None):
         self.calls=[]
         self.old=old
+        self.schemas={'Podcast':{}}
     def index(self,db,key):
         return {'apple:1':self.old} if db=='Episode' and self.old else {}
     def upsert(self,db,index,key,props):
@@ -69,6 +70,15 @@ class FakeNotion:
 
 
 class RecordTests(unittest.TestCase):
+    def test_podcast_source_is_optional(self):
+        n=FakeNotion()
+        sync.sync_records(n,{'show':{'attributes':{'name':'节目'}}},{},set())
+        self.assertNotIn('来源',n.calls[0][2])
+        self.assertEqual(n.calls[0][1],'apple:show')
+        n=FakeNotion()
+        n.schemas['Podcast']['来源']={'type':'rich_text'}
+        sync.sync_records(n,{'show':{'attributes':{'name':'节目'}}},{},set())
+        self.assertIn('来源',n.calls[0][2])
     def test_units_status_relations_and_source(self):
         n=FakeNotion()
         sync.sync_records(n,{'show':{'attributes':{'name':'节目'}}},
@@ -124,6 +134,27 @@ class AITests(unittest.TestCase):
 
 
 class TransportTests(unittest.TestCase):
+    def test_prepare_never_patches_large_podcast_schema(self):
+        n=object.__new__(sync.Notion)
+        n.dbs={'Podcast':'podcast-db','Episode':'episode-db','Author':'author-db'}
+        types={
+          'Podcast':{'播客':'title','Pid':'rich_text','链接':'url','Description':'rich_text','作者':'relation'},
+          'Episode':{'标题':'title','Eid':'rich_text','Podcast':'relation','音频':'rich_text','Description':'rich_text',
+                     '发布时间':'date','时间戳':'number','时长':'number','链接':'url','状态':'status'},
+          'Author':{'标题':'title'}}
+        n.schemas={db:{name:{'type':kind} for name,kind in fields.items()} for db,fields in types.items()}
+        n.schemas['Podcast']['演员']={'type':'multi_select','multi_select':{'options':[{'name':'x'*1035738}]}}
+        n.schemas['Podcast']['作者']['relation']={'database_id':'author-db'}
+        n.schemas['Episode']['Podcast']['relation']={'database_id':'podcast-db'}
+        n.schemas['Episode']['状态']['status']={'options':[{'name':x} for x in ('未听','在听','听过')]}
+        n.call=Mock()
+        n.prepare(True)
+        n.call.assert_called_once()
+        self.assertEqual(n.call.call_args.args[1],'databases/episode-db')
+        self.assertNotIn('演员',n.call.call_args.args[2]['properties'])
+        n.call.reset_mock()
+        n.prepare(False)
+        n.call.assert_not_called()
     def test_unrelated_untitled_databases_are_ignored(self):
         n=object.__new__(sync.Notion);n.dbs={}
         n.paginate=lambda _:iter([

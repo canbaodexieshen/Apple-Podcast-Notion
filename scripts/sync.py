@@ -235,8 +235,14 @@ class Notion:
         author_target = self.schemas['Podcast']['作者']['relation']['database_id'].replace('-', '')
         if author_target != self.dbs['Author'].replace('-', ''):
             raise ValueError('Podcast.作者 points to a different database')
-        for db in ('Podcast', 'Episode'):
-            fields = {'来源':'rich_text'} if db == 'Podcast' else additions
+        # Podcast templates can carry enormous unrelated multi-select options.
+        # Never patch that schema just to add a redundant source marker: Pid
+        # already namespaces Apple records. Write 来源 only when it exists.
+        podcast_source = self.schemas['Podcast'].get('来源')
+        if podcast_source and podcast_source['type'] != 'rich_text':
+            raise ValueError('Template field mismatch: Podcast.来源 must be rich_text')
+        for db in ('Episode',):
+            fields = additions
             missing = {}
             for name, kind in fields.items():
                 existing = self.schemas[db].get(name)
@@ -248,6 +254,8 @@ class Notion:
                 print(f'{db}: extra fields needed: ' + ', '.join(missing))
                 if write:
                     self.call('PATCH', 'databases/' + self.dbs[db], {'properties': missing})
+        if not podcast_source:
+            print('Podcast: source identified by apple: Pid; schema left unchanged')
         print('Notion core schema: OK')
 
     def index(self, db, key):
@@ -298,8 +306,10 @@ def sync_records(notion, shows, episodes, saved):
     for sid, show in shows.items():
         a = show.get('attributes', {})
         name = a.get('name') or 'Apple Podcasts ' + sid
-        props = {'播客':prop('title',name), 'Pid':prop('rich_text','apple:'+sid), '来源':prop('rich_text','Apple Podcasts'),
+        props = {'播客':prop('title',name), 'Pid':prop('rich_text','apple:'+sid),
                  '链接':prop('url',a.get('url') or 'https://podcasts.apple.com/cn/podcast/id'+sid)}
+        if notion.schemas['Podcast'].get('来源', {}).get('type') == 'rich_text':
+            props['来源'] = prop('rich_text','Apple Podcasts')
         if a.get('artistName'):
             author = a['artistName']
             author_page = authors.get(author) or notion.upsert('Author',authors,author,{'标题':prop('title',author)})
