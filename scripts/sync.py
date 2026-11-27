@@ -246,7 +246,7 @@ class Notion:
             kind = b['type']
             if kind == 'child_database':
                 name = b[kind]['title']
-                if name not in ('Podcast', 'Episode', 'Author', '全部'):
+                if name not in ('Podcast', 'Episode', 'Author', '全部', '思维导图'):
                     continue  # Templates may contain multiple unrelated Untitled placeholders.
                 if name in self.dbs:
                     raise ValueError('Duplicate database name: ' + name)
@@ -296,20 +296,8 @@ class Notion:
                     self.call('PATCH', 'databases/' + self.dbs[db], {'properties': missing})
         if not podcast_source:
             print('Podcast: source identified by apple: Pid; schema left unchanged')
-        listening = self.schemas['Episode'].get('收听时间')
-        if listening and listening['type'] == 'created_time':
-            if '同步创建时间' in self.schemas['Episode']:
-                raise ValueError('Cannot safely rename 收听时间: 同步创建时间 already exists')
-            print('Episode: preserve creation timestamp as 同步创建时间; add editable 收听时间')
-            if write:
-                self.call('PATCH','databases/'+self.dbs['Episode'],{'properties':{
-                    listening['id']:{'name':'同步创建时间'}}})
-                self.call('PATCH','databases/'+self.dbs['Episode'],{'properties':{'收听时间':{'date':{}}}})
-        elif not listening:
-            if write:
-                self.call('PATCH','databases/'+self.dbs['Episode'],{'properties':{'收听时间':{'date':{}}}})
-        elif listening['type'] != 'date':
-            raise ValueError('Episode.收听时间 must be date or original created_time')
+        from metadata import prepare_episode_fields
+        prepare_episode_fields(self,write)
         print('Notion core schema: OK')
 
     def index(self, db, key):
@@ -377,8 +365,8 @@ def sync_records(notion, shows, episodes, saved):
             author = a['artistName']
             author_page = authors.get(author) or notion.upsert('Author',authors,author,{'标题':prop('title',author)})
             props['作者'] = prop('relation',[{'id':author_page['id']}])
-            if not author_page.get('icon'):
-                notion.call('PATCH','pages/'+author_page['id'],{'icon':{'type':'emoji','emoji':'🎙️'}})
+            from metadata import fill_author_icon
+            fill_author_icon(notion,author_page,[cover_url(a)])
         if a.get('description',{}).get('standard') and not legacy:
             props['Description'] = prop('rich_text',a['description']['standard'][:1800])
         page = notion.upsert('Podcast',podcasts,'apple:'+sid,props)
@@ -411,7 +399,7 @@ def sync_records(notion, shows, episodes, saved):
                 props['播放位置'] = prop('number',p['positionInMilliseconds']/1000)
             if p.get('recordedAtTimestamp'):
                 props['进度更新时间'] = prop('date',{'start':p['recordedAtTimestamp']})
-                props['收听时间'] = prop('date',{'start':p['recordedAtTimestamp']})
+                props['最近收听时间'] = prop('date',{'start':p['recordedAtTimestamp']})
         elif not old:
             props['状态'] = prop('status',{'name':'未听'})
         description = a.get('description',{}).get('standard')
@@ -451,9 +439,8 @@ def finalize_metadata(notion):
                 [{'id':r['id']} for r in existing]+[{'id':all_page['id']}])}})
         if not page.get('cover') and (page.get('icon') or {}).get('type')=='external':
             notion.call('PATCH','pages/'+page['id'],{'cover':page['icon']})
-    for page in notion.paginate('databases/'+notion.dbs['Author']+'/query',{}):
-        if not page.get('icon'):
-            notion.call('PATCH','pages/'+page['id'],{'icon':{'type':'emoji','emoji':'🎙️'}})
+    from metadata import fill_all_author_icons
+    fill_all_author_icons(notion)
 
 
 def transcribe(url, api_key, directory):
@@ -521,7 +508,7 @@ def deepseek(text, key):
     chunks = [text[i:i+16000] for i in range(0,len(text),16000)]
     if len(chunks)>1:
         chunks = [completion(c,'根据播客逐字稿提炼中文要点，保留事实、分歧与关键数字，不补充外部知识。') for c in chunks]
-    output = completion('\n\n'.join(chunks), '将播客内容整理为中文 Markdown 大纲。只输出 #、##、###、#### 标题，每行一个简短要点，最多60行；忠于原文，不编造。')
+    output = completion('\n\n'.join(chunks), '将播客内容整理为中文 Markdown 大纲。第一行必须为唯一的 # 总标题，概括整期主题；其余只输出 ##、###、#### 标题，每行一个简短要点，最多60行；忠于原文，不编造。')
     return output
 
 
@@ -614,12 +601,14 @@ def main():
     notion.prepare(not args.check)
     shows,episodes,saved = fetch_apple()
     if args.check: return
+    from mindmap_library import ensure_database
+    ensure_database(notion)
     synced = sync_records(notion,shows,episodes,saved)
     finalize_metadata(notion)
-    from presentation import migrate, legacy_outline, set_mindmap
+    from presentation import migrate, saved_outline, set_mindmap
     for page,row in synced:
         migrate(notion,page['id'])
-        outline=legacy_outline(notion,page['id'])
+        outline=saved_outline(notion,page['id'])
         if outline:
             set_mindmap(notion,page['id'],outline)
     failures = 0 if args.no_ai else run_ai(notion,synced)

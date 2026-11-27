@@ -39,6 +39,8 @@ class MemoryNotion:
 
 
 class PresentationTests(unittest.TestCase):
+    def setUp(self):
+        patcher=patch('mindmap_library.publish');patcher.start();self.addCleanup(patcher.stop)
     def test_audio_update_omits_read_only_type(self):
         n=MemoryNotion();tabs=p.ensure_tabs(n,'root')
         block={'type':'audio','audio':{'type':'external','external':{'url':'https://example.test/a.mp3'}}}
@@ -70,7 +72,7 @@ class PresentationTests(unittest.TestCase):
         with self.assertRaises(ValueError):p.set_mindmap(n,'root','# 已有大纲')
         self.assertEqual(p.legacy_outline(n,'root'),'# 已有大纲')
         upload.side_effect=None
-        fingerprint=hashlib.sha256('markmap-v1|# 已有大纲'.encode()).hexdigest()
+        fingerprint=hashlib.sha256('markmap-v2|# 已有大纲'.encode()).hexdigest()
         upload.return_value={'type':'embed','embed':{'url':'https://example.test/mindmap-'+fingerprint+'.html'}}
         p.set_mindmap(n,'root','# 已有大纲')
         self.assertEqual(p.legacy_outline(n,'root'),'')

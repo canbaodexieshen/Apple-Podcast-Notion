@@ -12,7 +12,8 @@ test('Markmap uses a bundled renderer, escaped headings, zoom and theme controls
   const calls=[];
   const context={
     Transformer:class {transform(s){transformed=s;return {root:{}};}},
-    Markmap:{create(svg,opts){options=opts;return {fit(){calls.push('fit')},rescale(x){calls.push(x)}}}},
+    deriveOptions(opts){return {...opts, color: () => opts.color[0]}},
+    Markmap:{create(svg,opts){options=opts;return {setData(){return {then(){return {catch(){}}}}},fit(){calls.push('fit')},rescale(x){calls.push(x)}}}},
     document:{getElementById(id){return nodes[id]},documentElement:{classList:{toggle(name,value){dark=value}}}},
     matchMedia(){return {matches:false}},window:{addEventListener(){}}
   };
@@ -20,6 +21,7 @@ test('Markmap uses a bundled renderer, escaped headings, zoom and theme controls
   assert.match(transformed,/&lt;img/);
   assert.doesNotMatch(transformed,/paragraph/);
   assert.equal(options.initialExpandLevel,2);
+  assert.equal(typeof options.color,'function');
   nodes.in.onclick();nodes.out.onclick();nodes.fit.onclick();nodes.theme.onclick();
   assert.deepEqual(calls,[1.25,.8,'fit']);
   assert.equal(dark,true);

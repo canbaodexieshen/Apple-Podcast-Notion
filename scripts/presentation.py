@@ -49,7 +49,7 @@ def upload_html(notion, outline):
     if len(content)>5*1024*1024:
         raise ValueError('Markmap HTML exceeds 5 MiB safe upload limit')
     headers={**notion.headers,'Notion-Version':'2026-03-11'}
-    fingerprint=hashlib.sha256(('markmap-v1|'+outline).encode()).hexdigest()
+    fingerprint=hashlib.sha256(('markmap-v2|'+outline).encode()).hexdigest()
     filename='mindmap-'+fingerprint+'.html'
     response=requests.post('https://api.notion.com/v1/file_uploads',headers=headers,
         json={'mode':'single_part','filename':filename,'content_type':'text/html'},timeout=(15,90))
@@ -189,16 +189,51 @@ def legacy_outline(notion,page):
 
 
 def set_mindmap(notion,page,outline):
-    fingerprint=hashlib.sha256(('markmap-v1|'+outline).encode()).hexdigest()
+    fingerprint=hashlib.sha256(('markmap-v2|'+outline).encode()).hexdigest()
     # The uploaded filename tracks content without a technical caption in the UI.
     _,tabs=find_tabs(notion,page)
     existing=children(notion,tabs['脑图']['id']) if tabs else []
     reuse=any(b['type']=='embed' and fingerprint in unquote(urlsplit(b['embed'].get('url','')).path) for b in existing)
+    block=None
     if not reuse:
         tabs=migrate(notion,page)
         block=upload_html(notion,outline)
         replace_tab(notion,tabs['脑图'],[block])
+    from mindmap_library import publish
+    publish(notion,page,outline,block)
     # Remove only known old generated outline/diagram after the Markmap saved.
     for b in children(notion,page):
         if b['type']=='toggle' and plain(b) in ('Apple Podcasts · 内容大纲','Apple Podcasts · 思维导图'):
             notion.call('DELETE','blocks/'+b['id'])
+
+
+def saved_outline(notion,page):
+    """Resume completed AI results without calling the model again."""
+    from mindmap_library import lookup
+    record=lookup(notion,page,create=False)
+    if record:
+        from sync import text_value
+        outline=text_value(record,'脑图Markdown')
+        if outline:return outline
+    outline=legacy_outline(notion,page)
+    if outline:return outline
+    _,tabs=find_tabs(notion,page)
+    if not tabs:return ''
+    import re
+    for block in children(notion,tabs['脑图']['id']):
+        if block['type']!='embed':continue
+        url=block['embed'].get('url','')
+        if not url:continue
+        host=urlsplit(url).hostname or ''
+        if not (host.endswith('.amazonaws.com') or host.endswith('.notion.so') or
+                host.endswith('.notion-static.com') or host=='prod-files-secure.s3.us-west-2.amazonaws.com'):
+            continue
+        # No credentials are sent to signed Notion storage URLs.
+        response=requests.get(url,timeout=(15,90))
+        response.raise_for_status()
+        if len(response.content)>5*1024*1024:raise ValueError('Saved HTML exceeds safe limit')
+        match=re.search(r'<script\b[^>]*id=[\"\']map-data[\"\'][^>]*>(.*?)</script>',response.text,re.S)
+        if match:
+            value=json.loads(match[1])
+            if isinstance(value,str):return value
+    return ''

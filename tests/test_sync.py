@@ -134,7 +134,7 @@ class RecordTests(unittest.TestCase):
         self.assertEqual(key,'apple:1')
         self.assertEqual(p['时长']['number'],1225)
         self.assertEqual(p['播放位置']['number'],342)
-        self.assertEqual(p['收听时间']['date'],p['进度更新时间']['date'])
+        self.assertEqual(p['最近收听时间']['date'],p['进度更新时间']['date'])
         self.assertEqual(p['状态']['status']['name'],'在听')
         self.assertTrue(p['收藏']['checkbox'])
         self.assertEqual(p['Podcast']['relation'],[{'id':'apple:show'}])
@@ -252,7 +252,7 @@ class TransportTests(unittest.TestCase):
         types={
           'Podcast':{'播客':'title','Pid':'rich_text','链接':'url','Description':'rich_text','作者':'relation'},
           'Episode':{'标题':'title','Eid':'rich_text','Podcast':'relation','音频':'rich_text','Description':'rich_text',
-                     '发布时间':'date','时间戳':'number','时长':'number','链接':'url','状态':'status','收听时间':'date'},
+                     '发布时间':'date','时间戳':'number','时长':'number','链接':'url','状态':'status','最近收听时间':'date'},
           'Author':{'标题':'title'}}
         n.schemas={db:{name:{'type':kind} for name,kind in fields.items()} for db,fields in types.items()}
         n.schemas['Podcast']['演员']={'type':'multi_select','multi_select':{'options':[{'name':'x'*1035738}]}}
@@ -261,7 +261,7 @@ class TransportTests(unittest.TestCase):
         n.schemas['Episode']['状态']['status']={'options':[{'name':x} for x in ('未听','在听','听过')]}
         n.call=Mock()
         n.prepare(True)
-        n.call.assert_called_once()
+        self.assertEqual(n.call.call_count,2)
         self.assertEqual(n.call.call_args.args[1],'databases/episode-db')
         self.assertNotIn('演员',n.call.call_args.args[2]['properties'])
         n.call.reset_mock()
