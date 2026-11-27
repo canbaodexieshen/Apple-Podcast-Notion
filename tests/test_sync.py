@@ -70,6 +70,31 @@ class FakeNotion:
 
 
 class RecordTests(unittest.TestCase):
+    def test_index_ignores_duplicate_legacy_ids(self):
+        for db,key in [('Episode','Eid'),('Podcast','Pid')]:
+            with self.subTest(db=db):
+                n=object.__new__(sync.Notion)
+                n.dbs={db:'database'}
+                def page(id,value):
+                    return {'id':id,'properties':{key:{'type':'rich_text','rich_text':[{'plain_text':value}]}}}
+                n.paginate=Mock(return_value=iter([
+                    page('old1','690a1e6aaaf2588eb7f1fff2'),
+                    page('old2','690a1e6aaaf2588eb7f1fff2'),
+                    page('new','apple:1000675890293')]))
+                result=n.index(db,key)
+                self.assertEqual(list(result),['apple:1000675890293'])
+                self.assertEqual(result['apple:1000675890293']['id'],'new')
+                self.assertEqual(n.paginate.call_args.args[1],
+                    {'filter':{'property':key,'rich_text':{'starts_with':'apple:'}}})
+
+    def test_index_still_rejects_duplicate_apple_ids(self):
+        n=object.__new__(sync.Notion);n.dbs={'Episode':'database'}
+        def page(id):
+            return {'id':id,'properties':{'Eid':{'type':'rich_text','rich_text':[{'plain_text':'apple:123'}]}}}
+        n.paginate=Mock(return_value=iter([page('a'),page('b')]))
+        with self.assertRaisesRegex(ValueError,'Duplicate Episode.Eid: apple:123'):
+            n.index('Episode','Eid')
+
     def test_podcast_source_is_optional(self):
         n=FakeNotion()
         sync.sync_records(n,{'show':{'attributes':{'name':'节目'}}},{},set())

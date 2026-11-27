@@ -260,8 +260,15 @@ class Notion:
 
     def index(self, db, key):
         result = {}
-        for page in self.paginate('databases/'+self.dbs[db]+'/query', {}):
+        apple_only = (db, key) in (('Podcast', 'Pid'), ('Episode', 'Eid'))
+        query = {'filter': {'property': key, 'rich_text': {'starts_with': 'apple:'}}} if apple_only else {}
+        for page in self.paginate('databases/'+self.dbs[db]+'/query', query):
             value = text_value(page, key)
+            # Duplicate legacy IDs belong to the old source. Never reconcile,
+            # update or reject those records during an Apple sync. Also check
+            # locally so source isolation does not depend solely on the filter.
+            if apple_only and not value.startswith('apple:'):
+                continue
             if value in result and value:
                 raise ValueError(f'Duplicate {db}.{key}: {value}')
             if value:
