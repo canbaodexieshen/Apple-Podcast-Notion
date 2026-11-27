@@ -175,6 +175,26 @@ class AITests(unittest.TestCase):
         self.assertNotIn('sk-123456',message)
         self.assertNotIn('token=secret',message)
 
+    def test_audio_denial_is_separate_from_provider_permission_errors(self):
+        response=Mock(ok=False,status_code=403,url='https://podcast.xmcdn.com/audio',headers={'content-type':'text/html'})
+        with self.assertRaises(sync.AudioUnavailable):
+            sync.check_response(response,'audio_download')
+        with self.assertRaises(RuntimeError) as caught:
+            sync.check_response(response,'siliconflow_transcription chunk=1')
+        self.assertNotIsInstance(caught.exception,sync.AudioUnavailable)
+
+    @patch.dict(os.environ,{'SILICONFLOW_API_KEY':'secret','DEEPSEEK_API_KEY':'','AI_MAX_EPISODES':'1'})
+    @patch('sync.transcribe')
+    def test_blocked_audio_does_not_starve_next_episode_or_fail_basic_sync(self,transcribe):
+        transcribe.side_effect=[sync.AudioUnavailable('audio_download: HTTP 403'),'文字']
+        n=FakeNotion()
+        n.call=Mock()
+        pages=[({'id':i,'properties':{}},episode(i)) for i in ('1','2')]
+        self.assertEqual(sync.run_ai(n,pages),0)
+        self.assertEqual(transcribe.call_count,2)
+        messages=[sync.text_value({'properties':c.args[2]['properties']},'AI状态') for c in n.call.call_args_list]
+        self.assertTrue(any('音源受限' in m for m in messages))
+
     def test_mermaid_escapes_model_syntax(self):
         result=sync.mermaid('# 主旨\n## A[危险]"\n### 子项')
         self.assertIn('flowchart LR',result)

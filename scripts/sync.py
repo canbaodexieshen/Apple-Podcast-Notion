@@ -19,6 +19,10 @@ INCLUDE = {'l': 'zh-Hans-CN', 'include[podcast-episodes]': 'channel,playback-pos
            'with': 'entitlements,hlsVideo'}
 
 
+class AudioUnavailable(RuntimeError):
+    """A publisher denied access to audio; account/AI API failures are different."""
+
+
 def required(name):
     value = os.getenv(name, '').strip()
     if not value:
@@ -60,7 +64,8 @@ def check_response(response, stage):
     if trace and re.fullmatch(r'[\w.-]{1,120}',trace):
         details.append('request_id='+trace)
     host = urlsplit(response.url or '').hostname or 'unknown'
-    raise RuntimeError(f'{stage}: HTTP {response.status_code}, host={host}; '+ '; '.join(details))
+    error_type = AudioUnavailable if stage == 'audio_download' and response.status_code in (403,404,410) else RuntimeError
+    raise error_type(f'{stage}: HTTP {response.status_code}, host={host}; '+ '; '.join(details))
 
 
 def get_json(url, headers):
@@ -489,7 +494,7 @@ def run_ai(notion, synced):
     if not asr_key and not llm_key:
         print('AI disabled: no AI keys configured')
         return 0
-    failures = used = 0
+    failures = used = blocked = 0
     limit = int(os.getenv('AI_MAX_EPISODES','3'))
     for page,row in synced:
         a = row.get('attributes',{})
@@ -526,12 +531,20 @@ def run_ai(notion, synced):
                 notion.section(page['id'],'Apple Podcasts · 内容大纲',outline)
                 notion.section(page['id'],'Apple Podcasts · 思维导图',diagram,'mermaid')
                 notion.call('PATCH','pages/'+page['id'],{'properties':{'脑图指纹':prop('rich_text',map_hash),'AI状态':prop('rich_text','已完成')}})
+        except AudioUnavailable as error:
+            blocked += 1
+            used -= 1  # No AI request was made; do not starve later episodes.
+            message = '音源受限，未转写：' + safe_error(error)
+            print('Audio unavailable for episode '+row['id']+': '+message,flush=True)
+            if os.getenv('GITHUB_ACTIONS') == 'true':
+                print('::warning::Audio unavailable for episode '+row['id']+'; see AI状态 in Notion',flush=True)
+            notion.call('PATCH','pages/'+page['id'],{'properties':{'AI状态':prop('rich_text',message)}})
         except Exception as error:
             failures+=1
             message = f'{stage}: {safe_error(error)}'
             print('AI failed for episode '+row['id']+': '+message,flush=True)
             notion.call('PATCH','pages/'+page['id'],{'properties':{'AI状态':prop('rich_text',message)}})
-    print(f'AI: {used} processed, {failures} failed')
+    print(f'AI: {used} processed, {blocked} audio unavailable (skipped with warning), {failures} failed')
     return failures
 
 
