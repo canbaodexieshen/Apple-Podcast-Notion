@@ -1,0 +1,14 @@
+{
+  "name": "apple-podcast-notion-mindmap",
+  "private": true,
+  "scripts": {
+    "build": "esbuild web/mindmap.js --bundle --minify --outfile=web/mindmap.bundle.js"
+  },
+  "dependencies": {
+    "markmap-lib": "0.18.12",
+    "markmap-view": "0.18.12"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12"
+  }
+}

@@ -196,8 +196,9 @@ class Notion:
             time.sleep(max(0, .4 - (time.monotonic() - self.last)))
             self.last = time.monotonic()
             try:
+                headers = {**self.headers, 'Notion-Version':'2026-03-11'} if path.startswith('blocks/') else self.headers
                 response = requests.request(method, 'https://api.notion.com/v1/' + path,
-                    headers=self.headers, json=body, timeout=(15, 90), allow_redirects=False)
+                    headers=headers, json=body, timeout=(15, 90), allow_redirects=False)
             except (requests.Timeout, requests.ConnectionError):
                 if not read or attempt == 5:
                     raise  # Never blindly repeat uncertain creates/appends.
@@ -286,6 +287,20 @@ class Notion:
                     self.call('PATCH', 'databases/' + self.dbs[db], {'properties': missing})
         if not podcast_source:
             print('Podcast: source identified by apple: Pid; schema left unchanged')
+        listening = self.schemas['Episode'].get('收听时间')
+        if listening and listening['type'] == 'created_time':
+            if '同步创建时间' in self.schemas['Episode']:
+                raise ValueError('Cannot safely rename 收听时间: 同步创建时间 already exists')
+            print('Episode: preserve creation timestamp as 同步创建时间; add editable 收听时间')
+            if write:
+                self.call('PATCH','databases/'+self.dbs['Episode'],{'properties':{
+                    listening['id']:{'name':'同步创建时间'}}})
+                self.call('PATCH','databases/'+self.dbs['Episode'],{'properties':{'收听时间':{'date':{}}}})
+        elif not listening:
+            if write:
+                self.call('PATCH','databases/'+self.dbs['Episode'],{'properties':{'收听时间':{'date':{}}}})
+        elif listening['type'] != 'date':
+            raise ValueError('Episode.收听时间 must be date or original created_time')
         print('Notion core schema: OK')
 
     def index(self, db, key):
@@ -314,23 +329,15 @@ class Notion:
         return page
 
     def section(self, page, title, content, language=None):
-        blocks = list(self.paginate('blocks/'+page+'/children'))
-        existing = next((b for b in blocks if b['type']=='toggle' and ''.join(x.get('plain_text','') for x in b['toggle']['rich_text'])==title), None)
-        # Each section is a single paragraph/code block, chunked into rich_text runs.
-        kind = 'audio' if language == 'audio' else ('code' if language else 'paragraph')
-        payload = {'type':'external','external':{'url':content}} if kind == 'audio' else {'rich_text': rich(content)}
-        if language and kind == 'code':
-            payload['language'] = language
-        child = {'object':'block', 'type':kind, kind:payload}
-        if existing:
-            children = list(self.paginate('blocks/'+existing['id']+'/children'))
-            if children:
-                self.call('PATCH', 'blocks/'+children[0]['id'], {kind:payload})
-            else:
-                self.call('PATCH', 'blocks/'+existing['id']+'/children', {'children':[child]})
-        else:
-            self.call('PATCH', 'blocks/'+page+'/children', {'children':[{'object':'block', 'type':'toggle',
-                'toggle':{'rich_text':rich(title), 'children':[child]}}]})
+        from presentation import LEGACY, set_content, set_mindmap
+        if title == 'Apple Podcasts · 内容大纲':
+            return  # Stored inside the Markmap HTML, not as a separate section.
+        if title == 'Apple Podcasts · 思维导图':
+            return set_mindmap(self,page,content)
+        name=LEGACY.get(title)
+        if not name:
+            raise ValueError('Unknown managed section: '+title)
+        return set_content(self,page,name,content,language)
 
 
 def cover_url(attrs):
@@ -351,12 +358,15 @@ def sync_records(notion, shows, episodes, saved):
             author = a['artistName']
             author_page = authors.get(author) or notion.upsert('Author',authors,author,{'标题':prop('title',author)})
             props['作者'] = prop('relation',[{'id':author_page['id']}])
+            if not author_page.get('icon'):
+                notion.call('PATCH','pages/'+author_page['id'],{'icon':{'type':'emoji','emoji':'🎙️'}})
         if a.get('description',{}).get('standard'):
             props['Description'] = prop('rich_text',a['description']['standard'][:1800])
         page = notion.upsert('Podcast',podcasts,'apple:'+sid,props)
         show_pages[sid] = page['id']
         if cover_url(a):
-            notion.call('PATCH','pages/'+page['id'],{'icon':{'type':'external','external':{'url':cover_url(a)}}})
+            image={'type':'external','external':{'url':cover_url(a)}}
+            notion.call('PATCH','pages/'+page['id'],{'icon':image,'cover':image})
     synced = []
     for eid, row in episodes.items():
         a, p = row.get('attributes',{}), position(row)
@@ -382,18 +392,49 @@ def sync_records(notion, shows, episodes, saved):
                 props['播放位置'] = prop('number',p['positionInMilliseconds']/1000)
             if p.get('recordedAtTimestamp'):
                 props['进度更新时间'] = prop('date',{'start':p['recordedAtTimestamp']})
+                props['收听时间'] = prop('date',{'start':p['recordedAtTimestamp']})
         elif not old:
             props['状态'] = prop('status',{'name':'未听'})
         description = a.get('description',{}).get('standard')
         if description:
             props['Description'] = prop('rich_text',description[:1800])
         page = notion.upsert('Episode',entries,key,props)
+        art=cover_url(a)
+        if not art and podcast:
+            art=cover_url(shows.get(podcast[0]['id'],{}).get('attributes',{}))
+        if art:
+            image={'type':'external','external':{'url':art}}
+            notion.call('PATCH','pages/'+page['id'],{'icon':image,'cover':image})
         if description:
             notion.section(page['id'],'Apple Podcasts · 节目说明',description)
         if a.get('assetUrl'):
             notion.section(page['id'],'Apple Podcasts · 音频播放器',a['assetUrl'],'audio')
         synced.append((page,row))
     return synced
+
+
+def finalize_metadata(notion):
+    # Normalize all existing Podcast links to the template's aggregation row.
+    # Retain every other relation; never touch old IDs or listening totals.
+    all_rows=list(notion.paginate('databases/'+notion.dbs['全部']+'/query',{}))
+    all_page=next((p for p in all_rows if any(
+        prop.get('type')=='title' and ''.join(x.get('plain_text','') for x in prop['title'])=='全部'
+        for prop in p.get('properties',{}).values())),None)
+    if all_page is None:
+        db=notion.call('GET','databases/'+notion.dbs['全部'])
+        title_key=next(k for k,v in db['properties'].items() if v['type']=='title')
+        all_page=notion.call('POST','pages',{'parent':{'database_id':notion.dbs['全部']},
+            'properties':{title_key:prop('title','全部')}})
+    for page in notion.paginate('databases/'+notion.dbs['Podcast']+'/query',{}):
+        existing=page['properties'].get('全部',{}).get('relation',[])
+        if not any(r['id']==all_page['id'] for r in existing):
+            notion.call('PATCH','pages/'+page['id'],{'properties':{'全部':prop('relation',
+                [{'id':r['id']} for r in existing]+[{'id':all_page['id']}])}})
+        if not page.get('cover') and (page.get('icon') or {}).get('type')=='external':
+            notion.call('PATCH','pages/'+page['id'],{'cover':page['icon']})
+    for page in notion.paginate('databases/'+notion.dbs['Author']+'/query',{}):
+        if not page.get('icon'):
+            notion.call('PATCH','pages/'+page['id'],{'icon':{'type':'emoji','emoji':'🎙️'}})
 
 
 def transcribe(url, api_key, directory):
@@ -512,10 +553,10 @@ def run_ai(notion, synced):
         print(f'AI episode {row["id"]}: reuse_transcript={transcript_done}',flush=True)
         try:
             if transcript_done:
-                blocks = list(notion.paginate('blocks/'+page['id']+'/children'))
-                section = next(b for b in blocks if b['type']=='toggle' and ''.join(x.get('plain_text','') for x in b['toggle']['rich_text'])=='Apple Podcasts · 逐字稿')
-                children = list(notion.paginate('blocks/'+section['id']+'/children'))
-                transcript = ''.join(x.get('plain_text','') for x in children[0]['paragraph']['rich_text'])
+                from presentation import get_transcript
+                transcript=get_transcript(notion,page['id'])
+                if not transcript:
+                    raise ValueError('Saved transcript checkpoint has no readable content')
             else:
                 with tempfile.TemporaryDirectory() as temp:
                     transcript = transcribe(a['assetUrl'],asr_key,Path(temp))
@@ -525,11 +566,8 @@ def run_ai(notion, synced):
             if llm_key:
                 stage = 'deepseek_outline'
                 outline = deepseek(transcript,llm_key)
-                stage = 'render_mermaid'
-                diagram = mermaid(outline)
-                stage = 'save_outline_and_mermaid'
-                notion.section(page['id'],'Apple Podcasts · 内容大纲',outline)
-                notion.section(page['id'],'Apple Podcasts · 思维导图',diagram,'mermaid')
+                stage = 'save_markmap'
+                notion.section(page['id'],'Apple Podcasts · 思维导图',outline)
                 notion.call('PATCH','pages/'+page['id'],{'properties':{'脑图指纹':prop('rich_text',map_hash),'AI状态':prop('rich_text','已完成')}})
         except AudioUnavailable as error:
             blocked += 1
@@ -558,6 +596,13 @@ def main():
     shows,episodes,saved = fetch_apple()
     if args.check: return
     synced = sync_records(notion,shows,episodes,saved)
+    finalize_metadata(notion)
+    from presentation import migrate, legacy_outline, set_mindmap
+    for page,row in synced:
+        migrate(notion,page['id'])
+        outline=legacy_outline(notion,page['id'])
+        if outline:
+            set_mindmap(notion,page['id'],outline)
     failures = 0 if args.no_ai else run_ai(notion,synced)
     print('Basic sync complete')
     if failures:

@@ -1,6 +1,6 @@
 # Apple Podcasts → Notion
 
-将 Apple Podcasts 关注节目、收藏和最近播放记录同步到已有 Podcast2Notion 模板，使用硅基流动 SenseVoiceSmall 转写、DeepSeek 生成大纲，直接在 Notion Mermaid 代码块中展示树状脑图。
+将 Apple Podcasts 关注节目、收藏和最近播放记录同步到已有 Podcast2Notion 模板，使用硅基流动 SenseVoiceSmall 转写、DeepSeek 生成大纲，以原生 Notion 标签页和自包含 Markmap 交互脑图展示内容。
 
 ## 配置与首次运行
 
@@ -29,17 +29,21 @@
 Podcast 不新增字段，通过已有 Pid 的 `apple:` 前缀识别来源；如果已经存在 rich_text 类型的“来源”，则同时填写。这样可兼容含大量“演员”等多选选项、无法再修改结构的旧模板，无需删除选项或字段。此兼容处理仅避免修改 Podcast 结构，不解除 Notion 本身的结构大小限制；若 Episode 也有同类限制，需要另行检查。
 
 - `Pid/Eid` 使用 `apple:` 前缀，索引只查询和处理该前缀的记录。旧小宇宙页面不会被覆盖或删除，其重复 Pid/Eid 不影响 Apple 同步；若 Apple 自身的 ID 重复，仍会停止并报告，避免错误更新。同一节目跨平台会保留独立来源记录，不自动合并。
-- 发布时间和原“时间戳”继续指节目发布日期。原“收听时间”是 Notion 创建时间；真实进度更新时间另存。
+- 发布时间和原“时间戳”继续指节目发布日期。原创建时间字段保留并重命名为“同步创建时间”；新的“收听时间”为可写日期，保存 Apple 最近一次进度记录时间，与“进度更新时间”一致，不代表首次收听日期。旧小宇宙记录的原创建时间仍保留，新日期字段未自动猜测填充。
 - 时长和播放位置均转换为秒；状态使用模板既有“未听 / 在听 / 听过”。Apple 收藏与小宇宙“喜欢”分别保存。
-- 不将播放位置当成累计收听时长，原 Podcast 收听时长和“全部”汇总不填造假数据，可能保持空值。作者只能使用 Apple 返回的发布者名称，不保证对应每位主播。
-- 不执行旧脚本删除未听记录的逻辑。不更改用户笔记、评分及已有正文。未出现在本次 Apple 返回结果中的旧记录保留，包括收藏状态；仅本次获取到的单集更新收藏状态。
-- 节目简介属性保存前1800字符；有单集说明时完整文字另存托管折叠块。纯文本说明不保证恢复原始超链接。
+- 不将播放位置当成累计收听时长，原 Podcast 收听时长和“全部”汇总不填造假数据，可能保持空值。作者使用 Apple 返回的发布者名称；缺图标时统一使用🎙️，不把播客封面冒充主播头像。
+- 不执行旧脚本删除未听记录的逻辑。不更改用户笔记、评分。仅迁移本项目标记的自动生成正文。未出现在本次 Apple 返回结果中的旧记录保留，包括收藏状态；仅本次获取到的单集更新收藏状态。
+- 节目简介属性保存前1800字符；有单集说明时完整文字另存 ShowNotes 标签页。纯文本说明不保证恢复原始超链接。
 
 ## 转写与脑图
 
 下载音源后通过 FFmpeg 切成20分钟、16kHz单声道 WAV，每段约38.4MB，符合硅基流动1小时/50MB限制。默认音源下载上限512MiB，单个托管正文上限15万字符，超过会明确报错而不静默截断。SenseVoiceSmall 返回文字，不提供逐字时间轴或说话人标签保证。专有名词仍可能识别错误。
 
-DeepSeek 对长文本分段提炼，再生成 Markdown 大纲；程序转换为 `flowchart LR` 树状 Mermaid（兼容性优先），转义特殊字符、限制节点数。脑图直接写入 Notion `code.language=mermaid`，需要时在 Notion 切换预览模式。没有额外图床或脑图网页。
+DeepSeek 对长文本分段提炼，再生成 Markdown 大纲；Markmap 将其渲染为彩色可折叠、缩放和拖动的脑图，支持深浅色切换。脑图文件自包含渲染代码，不依赖外部CDN，上传至Notion HTML区块，在页面权限范围内展示，不通过GitHub Pages公开。Node构建包使用锁定版本，运行前执行 `npm ci && npm run build`。
+
+单集正文使用原生 Notion `tab` 区块，顺序固定为 **ShowNotes / 脑图 / 语音转文字 / 音频**。不再显示独立内容大纲或Mermaid。已有自动生成折叠块在内容成功保存后迁移归档；已保存的逐字稿和Markdown大纲会复用，不重新转写或调用DeepSeek。脑图迁移失败时保留原大纲，便于重试。上传 HTML 需要集成具备文件上传能力。
+
+Podcast封面与图标使用节目封面；Episode使用单集封面，缺失时回退至所属节目封面。所有Podcast页面补齐“全部”关联，保留已有其他关联；原有作者缺图标时补🎙️。收听时长暂不写入。
 
 大纲请求显式关闭 DeepSeek 思考模式，输出预算8192 tokens，仅在明确返回 `finish_reason=length` 时用16384 tokens重试一次；其他结束原因明确记录，不无限重试。日志只记录结束原因和用量，不输出思考内容或逐字稿。下载、硅基流动转写、DeepSeek、Notion保存分阶段报告错误，HTTP错误含服务域名、错误码和可用的请求追踪ID，过滤凭证和URL。
 
@@ -47,7 +51,7 @@ DeepSeek 对长文本分段提炼，再生成 Markdown 大纲；程序转换为 
 
 `Targeted AI diagnosis and recovery` 工作流可手动诊断并恢复最初三集失败任务，复用已保存逐字稿，会调用AI并写入恢复结果。仅在修改诊断文件且提交信息含 `[verify-ai]` 时自动运行，正常推送不会调用AI。本机 `python scripts/diagnose_ai.py` 只探测音源；加 `--recover` 才执行恢复。
 
-逐字稿、大纲和脑图写入带 `Apple Podcasts ·` 标记的独立折叠块。转写完成后立即保存指纹，脑图失败可重用已保存逐字稿。普通重复运行不重复转写；音源 URL 或模型变化会触发相应阶段重做。AI失败不会回滚已同步资料，但任务显示失败便于排查，之后运行继续处理。AI POST 请求不盲目重试，网络断开时可能已产生服务端费用。
+逐字稿和脑图写入对应原生标签页。转写完成后立即保存指纹，脑图失败可重用已保存逐字稿。普通重复运行不重复转写；音源 URL 或模型变化会触发相应阶段重做。AI失败不会回滚已同步资料，但任务显示失败便于排查，之后运行继续处理。AI POST 请求不盲目重试，网络断开时可能已产生服务端费用。
 
 无 AI Key 时基础同步仍正常。已有逐字稿且只配置 DeepSeek Key 时可继续生成脑图。新增单集需要硅基流动 Key 才能转写。当前官方列 SenseVoiceSmall 免费，免费策略和限流可能变化。
 
@@ -61,9 +65,11 @@ DeepSeek 对长文本分段提炼，再生成 Markdown 大纲；程序转换为 
 
 ## 本机运行与测试
 
-Python 3.12，`pip install -r requirements.txt`。转写另需 FFmpeg 在 PATH 中。`.env.example` 仅列变量名，程序不自动加载 `.env`，请通过当前终端环境变量配置。
+Python 3.12、Node 22，`pip install -r requirements.txt`。转写另需 FFmpeg 在 PATH 中。`.env.example` 仅列变量名，程序不自动加载 `.env`，请通过当前终端环境变量配置。
 
 ```sh
+npm ci
+npm run build
 python scripts/sync.py --check
 python scripts/sync.py --no-ai
 python scripts/sync.py
@@ -72,11 +78,16 @@ python -m unittest discover -s tests -v
 node --test tests/test_heatmap_ui.cjs
 ```
 
-Apple 网页接口为未公开稳定承诺的接口，凭证寿命未确定，需人工更新。基础数据读取已由实际账号验证（5个关注节目、1集收藏、26集分页进度）；自动写入、AI调用与Notion中的图形预览仍需要配置个人凭证后验收。程序带只读预检、限流、读请求退避、去重及托管正文更新，但无法保证第三方接口永不报错。
+Apple 网页接口为未公开稳定承诺的接口，凭证寿命未确定，需人工更新。基础数据读取已由实际账号验证（5个关注节目、1集收藏、26集分页进度）；实际账号的基础同步、转写和DeepSeek大纲已经验证；客户端视觉与第三方接口仍可能变化。程序带只读预检、限流、读请求退避、去重及托管正文更新，但无法保证第三方接口永不报错。
 
 ## 参考与复用
 
 - [Podcast2Notion](https://github.com/canbaodexieshen/Podcast2Notion)：数据库命名、字段语义、关系和按来源标识更新的适配思路。旧获取接口、删除逻辑和外部上传服务不沿用。
 - [Read-notion](https://github.com/canbaodexieshen/Read-notion)、[duolingo-notion](https://github.com/canbaodexieshen/duolingo-notion)：热力图前端与主题、年份控制。
 - [硅基流动转写接口](https://api-docs.siliconflow.cn/docs/api/audio-transcriptions-post)
-- [Notion code block API](https://developers.notion.com/reference/block#code)
+- [Notion native tabs and HTML API](https://developers.notion.com/reference/block#tab)
+- [Markmap](https://github.com/markmap/markmap)（MIT）
+
+## 已有数据升级
+
+在 Actions 手动运行 `Migrate native tabs and metadata`，只同步基础资料和迁移已有内容，不调用转写或DeepSeek。末尾会读回校验四个标签页、图标封面、关联和日期。常规同步同样执行升级逻辑，重复运行不会新增重复标签组。

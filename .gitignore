@@ -6,3 +6,5 @@ site/
 cache/
 *.mp3
 *.wav
+node_modules/
+web/mindmap.bundle.js

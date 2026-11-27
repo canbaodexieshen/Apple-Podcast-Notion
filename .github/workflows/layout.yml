@@ -1,0 +1,36 @@
+name: Migrate native tabs and metadata
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/layout.yml
+permissions:
+  contents: read
+concurrency:
+  group: apple-podcasts-sync
+  cancel-in-progress: false
+jobs:
+  migrate:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[verify-layout]')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+      NOTION_PAGE: ${{ secrets.NOTION_PAGE }}
+      APPLE_BEARER_TOKEN: ${{ secrets.APPLE_BEARER_TOKEN }}
+      APPLE_MEDIA_USER_TOKEN: ${{ secrets.APPLE_MEDIA_USER_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: pip install -r requirements.txt
+      - run: npm ci && npm run build
+      - run: python -u scripts/sync.py --no-ai
+      - run: python -u scripts/verify_layout.py
