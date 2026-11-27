@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - .github/workflows/verify-full.yml
+      - scripts/sync.py
 permissions:
   contents: read
 concurrency:

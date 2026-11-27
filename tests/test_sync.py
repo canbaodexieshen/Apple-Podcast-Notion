@@ -4,7 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch, Mock
+from unittest.mock import patch, Mock, MagicMock
 from urllib.parse import urlsplit, parse_qs
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
@@ -154,6 +154,36 @@ class RecordTests(unittest.TestCase):
 
 
 class AITests(unittest.TestCase):
+    @patch('sync.time.sleep')
+    @patch('sync.requests.get')
+    def test_source_timeout_retries_once_then_skips_as_source_failure(self,get,sleep):
+        get.side_effect=sync.requests.ReadTimeout()
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaises(sync.AudioTemporarilyUnavailable):
+                sync.download_audio('https://publisher.example/audio',Path(temp)/'audio')
+        self.assertEqual(get.call_count,2)
+        self.assertNotIn('Authorization',str(get.call_args.kwargs))
+    @patch('sync.time.sleep')
+    @patch('sync.requests.get')
+    def test_source_retry_can_recover_without_leaving_partial_file(self,get,sleep):
+        response=MagicMock(ok=True,status_code=200)
+        response.__enter__.return_value=response
+        response.iter_content.return_value=[b'complete audio']
+        get.side_effect=[sync.requests.ReadTimeout(),response]
+        with tempfile.TemporaryDirectory() as temp:
+            path=Path(temp)/'audio';path.write_bytes(b'old partial audio')
+            sync.download_audio('https://publisher.example/audio',path)
+            self.assertEqual(path.read_bytes(),b'complete audio')
+        self.assertEqual(get.call_count,2)
+    @patch('sync.requests.post',side_effect=sync.requests.ReadTimeout())
+    @patch('sync.subprocess.run')
+    @patch('sync.download_audio')
+    def test_provider_timeout_is_not_misclassified_or_blindly_retried(self,download,ffmpeg,post):
+        with tempfile.TemporaryDirectory() as temp:
+            folder=Path(temp);(folder/'part-0000.wav').write_bytes(b'RIFF')
+            with self.assertRaises(sync.requests.ReadTimeout):
+                sync.transcribe('https://publisher.example/audio','key',folder)
+        self.assertEqual(post.call_count,1)
     def response(self, reason='stop', content='# 要点'):
         return Mock(ok=True,json=lambda:{'choices':[{'finish_reason':reason,'message':{'content':content}}],
                                          'usage':{'completion_tokens':100}})

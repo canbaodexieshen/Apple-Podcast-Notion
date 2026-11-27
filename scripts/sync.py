@@ -23,6 +23,10 @@ class AudioUnavailable(RuntimeError):
     """A publisher denied access to audio; account/AI API failures are different."""
 
 
+class AudioTemporarilyUnavailable(AudioUnavailable):
+    """Only a failed source download, before any AI request has been made."""
+
+
 def required(name):
     value = os.getenv(name, '').strip()
     if not value:
@@ -443,21 +447,37 @@ def finalize_metadata(notion):
     fill_all_author_icons(notion)
 
 
-def transcribe(url, api_key, directory):
+def download_audio(url, audio):
     parts = urlsplit(url)
     if parts.scheme != 'https' or not parts.hostname:
         raise ValueError('Audio requires HTTPS')
+    for attempt in range(2):
+        try:
+            # Session credentials are never forwarded to an audio host.
+            with requests.get(url,stream=True,timeout=(15,120)) as response:
+                if response.status_code in (429,500,502,503,504):
+                    raise AudioTemporarilyUnavailable(f'audio_download: HTTP {response.status_code}, host={parts.hostname}')
+                check_response(response, 'audio_download')
+                size = 0
+                with audio.open('wb') as f:
+                    for chunk in response.iter_content(1024*256):
+                        size += len(chunk)
+                        if size > 512*1024*1024:
+                            raise ValueError('Audio exceeds 512 MiB download safety limit')
+                        f.write(chunk)
+            return
+        except (requests.Timeout, requests.ConnectionError, requests.exceptions.ChunkedEncodingError) as error:
+            transient=AudioTemporarilyUnavailable(f'audio_download: {type(error).__name__}, host={parts.hostname}')
+        except AudioTemporarilyUnavailable as error:
+            transient=error
+        if attempt==1:raise transient
+        print('Audio download temporarily unavailable; retrying once before skipping',flush=True)
+        time.sleep(2)
+
+
+def transcribe(url, api_key, directory):
     audio = directory/'source.audio'
-    # Session credentials are never forwarded to an audio host.
-    with requests.get(url,stream=True,timeout=(15,120)) as response:
-        check_response(response, 'audio_download')
-        size = 0
-        with audio.open('wb') as f:
-            for chunk in response.iter_content(1024*256):
-                size += len(chunk)
-                if size > 512*1024*1024:
-                    raise ValueError('Audio exceeds 512 MiB download safety limit')
-                f.write(chunk)
+    download_audio(url,audio)
     # 30min mono 16k PCM = 57.6 MB, so use 20min chunks (<50MB).
     subprocess.run(['ffmpeg','-v','error','-nostdin','-i',str(audio),'-map','0:a:0','-ac','1','-ar','16000',
                     '-c:a','pcm_s16le','-f','segment','-segment_time','1200',str(directory/'part-%04d.wav')],check=True,
@@ -578,7 +598,8 @@ def run_ai(notion, synced):
         except AudioUnavailable as error:
             blocked += 1
             used -= 1  # No AI request was made; do not starve later episodes.
-            message = '音源受限，未转写：' + safe_error(error)
+            label='音源暂不可用，未转写：' if isinstance(error,AudioTemporarilyUnavailable) else '音源受限，未转写：'
+            message = label + safe_error(error)
             print('Audio unavailable for episode '+row['id']+': '+message,flush=True)
             if os.getenv('GITHUB_ACTIONS') == 'true':
                 print('::warning::Audio unavailable for episode '+row['id']+'; see AI状态 in Notion',flush=True)
@@ -611,10 +632,10 @@ def main():
         outline=saved_outline(notion,page['id'])
         if outline:
             set_mindmap(notion,page['id'],outline)
+    # Finish verified presentation/schema migration independently of new AI jobs.
+    from mindmap_library import retire_markdown_property
+    retire_markdown_property(notion)
     failures = 0 if args.no_ai else run_ai(notion,synced)
-    if not failures:
-        from mindmap_library import retire_markdown_property
-        retire_markdown_property(notion)
     print('Basic sync complete')
     if failures:
         raise RuntimeError(f'{failures} AI tasks failed; basic sync is saved. Rerun to resume.')
