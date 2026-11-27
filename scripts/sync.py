@@ -35,7 +35,32 @@ def safe_error(error):
     for key, value in os.environ.items():
         if value and any(s in key for s in ('TOKEN', 'KEY', 'SECRET')):
             message = message.replace(value, '[redacted]')
+    message = re.sub(r'https?://[^\s\"<>]+', '[url redacted]', message)
+    message = re.sub(r'(?i)bearer\s+\S+|sk-[\w-]+', '[redacted]', message)
     return re.sub(r'(ntn_|secret_)[\w-]+', '[redacted]', message)[:500]
+
+
+def check_response(response, stage):
+    """Report the failed service, without logging headers, signed URLs or content."""
+    if response.ok:
+        return
+    details = []
+    if 'json' in response.headers.get('content-type', ''):
+        try:
+            body = response.json()
+            error = body.get('error', body) if isinstance(body, dict) else {}
+            if isinstance(error, dict):
+                for key in ('code', 'type', 'message'):
+                    value = error.get(key)
+                    if isinstance(value, (str, int)):
+                        details.append(f'{key}={safe_error(ValueError(str(value)))[:180]}')
+        except ValueError:
+            pass
+    trace = response.headers.get('x-siliconcloud-trace-id') or response.headers.get('x-request-id')
+    if trace and re.fullmatch(r'[\w.-]{1,120}',trace):
+        details.append('request_id='+trace)
+    host = urlsplit(response.url or '').hostname or 'unknown'
+    raise RuntimeError(f'{stage}: HTTP {response.status_code}, host={host}; '+ '; '.join(details))
 
 
 def get_json(url, headers):
@@ -373,7 +398,7 @@ def transcribe(url, api_key, directory):
     audio = directory/'source.audio'
     # Session credentials are never forwarded to an audio host.
     with requests.get(url,stream=True,timeout=(15,120)) as response:
-        response.raise_for_status()
+        check_response(response, 'audio_download')
         size = 0
         with audio.open('wb') as f:
             for chunk in response.iter_content(1024*256):
@@ -386,12 +411,13 @@ def transcribe(url, api_key, directory):
                     '-c:a','pcm_s16le','-f','segment','-segment_time','1200',str(directory/'part-%04d.wav')],check=True,
                    stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=900)
     texts = []
-    for part in sorted(directory.glob('part-*.wav')):
+    for index, part in enumerate(sorted(directory.glob('part-*.wav')), 1):
+        print(f'ASR: submitting chunk {index}, bytes={part.stat().st_size}', flush=True)
         with part.open('rb') as f:
             response = requests.post('https://api.siliconflow.cn/v1/audio/transcriptions',
                 headers={'Authorization':'Bearer '+api_key},data={'model':'FunAudioLLM/SenseVoiceSmall'},
                 files={'file':(part.name,f,'audio/wav')},timeout=(20,600))
-        response.raise_for_status()
+        check_response(response, f'siliconflow_transcription chunk={index}')
         text = response.json().get('text','').strip()
         if not text:
             raise ValueError('ASR returned empty text')
@@ -404,15 +430,29 @@ def transcribe(url, api_key, directory):
 def deepseek(text, key):
     model = os.getenv('DEEPSEEK_MODEL','deepseek-flash')
     def completion(content, instruction):
-        response = requests.post('https://api.deepseek.com/chat/completions',
-            headers={'Authorization':'Bearer '+key},json={'model':model,'messages':[
-                {'role':'system','content':instruction},{'role':'user','content':content}],
-                'max_tokens':4096,'stream':False},timeout=(20,300))
-        response.raise_for_status()
-        result = response.json()['choices'][0]
-        if result.get('finish_reason')!='stop':
-            raise ValueError('DeepSeek output incomplete')
-        return result['message']['content']
+        # Outline extraction does not need reasoning. Explicitly disable the
+        # provider's default thinking mode so it cannot consume the output budget.
+        for budget in (8192, 16384):
+            response = requests.post('https://api.deepseek.com/chat/completions',
+                headers={'Authorization':'Bearer '+key},json={'model':model,'messages':[
+                    {'role':'system','content':instruction},{'role':'user','content':content}],
+                    'thinking':{'type':'disabled'},'max_tokens':budget,'stream':False},timeout=(20,300))
+            check_response(response, 'deepseek_outline')
+            body = response.json()
+            result = body['choices'][0]
+            reason = result.get('finish_reason')
+            usage = body.get('usage',{})
+            print(f'DeepSeek: model={model}, thinking=disabled, finish_reason={reason}, '
+                  f'output_tokens={usage.get("completion_tokens")}, budget={budget}',flush=True)
+            if reason == 'length' and budget == 8192:
+                print('DeepSeek: output reached budget, retry once with 16384 tokens',flush=True)
+                continue
+            if reason != 'stop':
+                raise ValueError(f'DeepSeek output incomplete: finish_reason={reason}, budget={budget}')
+            answer = result['message'].get('content')
+            if not isinstance(answer,str) or not answer.strip():
+                raise ValueError('DeepSeek returned empty outline')
+            return answer
     chunks = [text[i:i+16000] for i in range(0,len(text),16000)]
     if len(chunks)>1:
         chunks = [completion(c,'根据播客逐字稿提炼中文要点，保留事实、分歧与关键数字，不补充外部知识。') for c in chunks]
@@ -463,6 +503,8 @@ def run_ai(notion, synced):
         if not transcript_done and not asr_key: continue
         if used>=limit: break
         used+=1
+        stage = 'load_saved_transcript' if transcript_done else 'audio_download_or_transcription'
+        print(f'AI episode {row["id"]}: reuse_transcript={transcript_done}',flush=True)
         try:
             if transcript_done:
                 blocks = list(notion.paginate('blocks/'+page['id']+'/children'))
@@ -472,18 +514,23 @@ def run_ai(notion, synced):
             else:
                 with tempfile.TemporaryDirectory() as temp:
                     transcript = transcribe(a['assetUrl'],asr_key,Path(temp))
+                stage = 'save_transcript'
                 notion.section(page['id'],'Apple Podcasts · 逐字稿',transcript)
                 notion.call('PATCH','pages/'+page['id'],{'properties':{'转写指纹':prop('rich_text',fingerprint),'AI状态':prop('rich_text','已转写')}})
             if llm_key:
+                stage = 'deepseek_outline'
                 outline = deepseek(transcript,llm_key)
+                stage = 'render_mermaid'
                 diagram = mermaid(outline)
+                stage = 'save_outline_and_mermaid'
                 notion.section(page['id'],'Apple Podcasts · 内容大纲',outline)
                 notion.section(page['id'],'Apple Podcasts · 思维导图',diagram,'mermaid')
                 notion.call('PATCH','pages/'+page['id'],{'properties':{'脑图指纹':prop('rich_text',map_hash),'AI状态':prop('rich_text','已完成')}})
         except Exception as error:
             failures+=1
-            print('AI failed for episode '+row['id']+': '+safe_error(error))
-            notion.call('PATCH','pages/'+page['id'],{'properties':{'AI状态':prop('rich_text','失败，后续重试')}})
+            message = f'{stage}: {safe_error(error)}'
+            print('AI failed for episode '+row['id']+': '+message,flush=True)
+            notion.call('PATCH','pages/'+page['id'],{'properties':{'AI状态':prop('rich_text',message)}})
     print(f'AI: {used} processed, {failures} failed')
     return failures
 

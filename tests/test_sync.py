@@ -131,6 +131,50 @@ class RecordTests(unittest.TestCase):
 
 
 class AITests(unittest.TestCase):
+    def response(self, reason='stop', content='# 要点'):
+        return Mock(ok=True,json=lambda:{'choices':[{'finish_reason':reason,'message':{'content':content}}],
+                                         'usage':{'completion_tokens':100}})
+
+    @patch('sync.requests.post')
+    def test_deepseek_explicitly_disables_thinking(self, post):
+        post.return_value=self.response()
+        self.assertEqual(sync.deepseek('文字','secret'),'# 要点')
+        payload=post.call_args.kwargs['json']
+        self.assertEqual(payload['thinking'],{'type':'disabled'})
+        self.assertEqual(payload['max_tokens'],8192)
+
+    @patch('sync.requests.post')
+    def test_length_retries_once_with_larger_budget(self, post):
+        post.side_effect=[self.response('length'),self.response()]
+        sync.deepseek('文字','secret')
+        self.assertEqual(post.call_count,2)
+        self.assertEqual(post.call_args.kwargs['json']['max_tokens'],16384)
+
+    @patch('sync.requests.post')
+    def test_content_filter_has_precise_reason_and_no_retry(self, post):
+        post.return_value=self.response('content_filter')
+        with self.assertRaisesRegex(ValueError,'finish_reason=content_filter'):
+            sync.deepseek('文字','secret')
+        self.assertEqual(post.call_count,1)
+
+    @patch('sync.requests.post')
+    def test_deepseek_empty_result_rejected(self, post):
+        post.return_value=self.response(content='')
+        with self.assertRaisesRegex(ValueError,'empty outline'):
+            sync.deepseek('文字','secret')
+
+    def test_http_diagnostic_names_provider_and_redacts_credentials(self):
+        response=Mock(ok=False,status_code=403,url='https://api.siliconflow.cn/v1/audio/transcriptions',
+            headers={'content-type':'application/json','x-siliconcloud-trace-id':'trace-123'},
+            json=lambda:{'error':{'code':'blocked','message':'denied sk-123456 https://private.example/?token=secret'}})
+        with self.assertRaises(RuntimeError) as caught:
+            sync.check_response(response,'siliconflow_transcription chunk=1')
+        message=str(caught.exception)
+        self.assertIn('siliconflow_transcription chunk=1: HTTP 403',message)
+        self.assertIn('request_id=trace-123',message)
+        self.assertNotIn('sk-123456',message)
+        self.assertNotIn('token=secret',message)
+
     def test_mermaid_escapes_model_syntax(self):
         result=sync.mermaid('# 主旨\n## A[危险]"\n### 子项')
         self.assertIn('flowchart LR',result)

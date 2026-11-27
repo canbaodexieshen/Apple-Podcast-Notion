@@ -41,6 +41,10 @@ Podcast 不新增字段，通过已有 Pid 的 `apple:` 前缀识别来源；如
 
 DeepSeek 对长文本分段提炼，再生成 Markdown 大纲；程序转换为 `flowchart LR` 树状 Mermaid（兼容性优先），转义特殊字符、限制节点数。脑图直接写入 Notion `code.language=mermaid`，需要时在 Notion 切换预览模式。没有额外图床或脑图网页。
 
+大纲请求显式关闭 DeepSeek 思考模式，输出预算8192 tokens，仅在明确返回 `finish_reason=length` 时用16384 tokens重试一次；其他结束原因明确记录，不无限重试。日志只记录结束原因和用量，不输出思考内容或逐字稿。下载、硅基流动转写、DeepSeek、Notion保存分阶段报告错误，HTTP错误含服务域名、错误码和可用的请求追踪ID，过滤凭证和URL。
+
+`Targeted AI diagnosis and recovery` 工作流可手动诊断并恢复最初三集失败任务，复用已保存逐字稿，会调用AI并写入恢复结果。仅在修改诊断文件且提交信息含 `[verify-ai]` 时自动运行，正常推送不会调用AI。本机 `python scripts/diagnose_ai.py` 只探测音源；加 `--recover` 才执行恢复。
+
 逐字稿、大纲和脑图写入带 `Apple Podcasts ·` 标记的独立折叠块。转写完成后立即保存指纹，脑图失败可重用已保存逐字稿。普通重复运行不重复转写；音源 URL 或模型变化会触发相应阶段重做。AI失败不会回滚已同步资料，但任务显示失败便于排查，之后运行继续处理。AI POST 请求不盲目重试，网络断开时可能已产生服务端费用。
 
 无 AI Key 时基础同步仍正常。已有逐字稿且只配置 DeepSeek Key 时可继续生成脑图。新增单集需要硅基流动 Key 才能转写。当前官方列 SenseVoiceSmall 免费，免费策略和限流可能变化。
