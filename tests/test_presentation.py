@@ -74,7 +74,10 @@ class PresentationTests(unittest.TestCase):
         upload.return_value={'type':'embed','embed':{'url':'https://example.test/mindmap-'+fingerprint+'.html'}}
         p.set_mindmap(n,'root','# 已有大纲')
         self.assertEqual(p.legacy_outline(n,'root'),'')
+        # An interrupted cleanup must resume even when the new HTML is saved.
+        self.legacy(n,'Apple Podcasts · 内容大纲','# 已有大纲')
         p.set_mindmap(n,'root','# 已有大纲')
+        self.assertEqual(p.legacy_outline(n,'root'),'')
         self.assertEqual(upload.call_count,2)  # failed once, uploaded once, then reused
     @patch('presentation.upload_html')
     def test_mindmap_upload_does_not_discard_existing_on_failure(self,upload):

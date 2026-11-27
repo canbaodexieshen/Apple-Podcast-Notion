@@ -193,11 +193,11 @@ def set_mindmap(notion,page,outline):
     # The uploaded filename tracks content without a technical caption in the UI.
     _,tabs=find_tabs(notion,page)
     existing=children(notion,tabs['脑图']['id']) if tabs else []
-    if any(b['type']=='embed' and fingerprint in unquote(urlsplit(b['embed'].get('url','')).path) for b in existing):
-        return
-    tabs=migrate(notion,page)
-    block=upload_html(notion,outline)
-    replace_tab(notion,tabs['脑图'],[block])
+    reuse=any(b['type']=='embed' and fingerprint in unquote(urlsplit(b['embed'].get('url','')).path) for b in existing)
+    if not reuse:
+        tabs=migrate(notion,page)
+        block=upload_html(notion,outline)
+        replace_tab(notion,tabs['脑图'],[block])
     # Remove only known old generated outline/diagram after the Markmap saved.
     for b in children(notion,page):
         if b['type']=='toggle' and plain(b) in ('Apple Podcasts · 内容大纲','Apple Podcasts · 思维导图'):
