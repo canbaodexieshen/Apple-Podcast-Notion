@@ -174,6 +174,7 @@ def prop(kind, value):
 
 def text_value(page, name):
     p = page.get('properties', {}).get(name, {})
+    if p.get('type','rich_text') not in ('title','rich_text'):return ''
     return ''.join(x.get('plain_text', x.get('text', {}).get('content', '')) for x in p.get(p.get('type', 'rich_text'), []) or [])
 
 
@@ -209,7 +210,7 @@ class Notion:
             time.sleep(max(0, .4 - (time.monotonic() - self.last)))
             self.last = time.monotonic()
             try:
-                headers = {**self.headers, 'Notion-Version':'2026-03-11'} if path.startswith('blocks/') else self.headers
+                headers = {**self.headers, 'Notion-Version':'2026-03-11'} if path.startswith(('blocks/','data_sources/')) else self.headers
                 response = requests.request(method, 'https://api.notion.com/v1/' + path,
                     headers=headers, json=body, timeout=(15, 90), allow_redirects=False)
             except (requests.Timeout, requests.ConnectionError):
@@ -258,14 +259,14 @@ class Notion:
             elif b.get('has_children') and kind not in ('child_page', 'synced_block'):
                 self.discover(b['id'], depth+1)
 
-    def prepare(self, write):
+    def prepare(self):
         needed = {
             'Podcast': {'播客':'title', 'Pid':'rich_text', '链接':'url', 'Description':'rich_text', '作者':'relation'},
             'Episode': {'标题':'title', 'Eid':'rich_text', 'Podcast':'relation', '音频':'rich_text', 'Description':'rich_text',
                         '发布时间':'date', '时间戳':'number', '时长':'number', '链接':'url', '状态':'status'},
             'Author': {'标题':'title'}}
         additions = {'来源':'rich_text', '播放位置':'number', '进度更新时间':'date', '收藏':'checkbox',
-                     'AI状态':'rich_text', '转写指纹':'rich_text', '脑图指纹':'rich_text'}
+                     '转写指纹':'rich_text', '脑图指纹':'rich_text'}
         for db, expected in needed.items():
             for name, kind in expected.items():
                 if self.schemas[db].get(name, {}).get('type') != kind:
@@ -296,12 +297,13 @@ class Notion:
                     missing[name] = {kind: {}}
             if missing:
                 print(f'{db}: extra fields needed: ' + ', '.join(missing))
-                if write:
-                    self.call('PATCH', 'databases/' + self.dbs[db], {'properties': missing})
+                self.call('PATCH', 'databases/' + self.dbs[db], {'properties': missing})
         if not podcast_source:
             print('Podcast: source identified by apple: Pid; schema left unchanged')
         from metadata import prepare_episode_fields
-        prepare_episode_fields(self,write)
+        prepare_episode_fields(self,True)
+        from ai_state import prepare_status
+        prepare_status(self)
         print('Notion core schema: OK')
 
     def index(self, db, key):
@@ -385,6 +387,7 @@ def sync_records(notion, shows, episodes, saved):
         old = entries.get(key, {})
         props = {'标题':prop('title',a.get('name') or eid), 'Eid':prop('rich_text',key),
                  '来源':prop('rich_text','Apple Podcasts'), '收藏':prop('checkbox',eid in saved)}
+        if not old:props['AI状态']=prop('status',{'name':'待处理'})
         mappings = [('assetUrl','音频','rich_text'),('url','链接','url')]
         for src,dst,kind in mappings:
             if a.get(src): props[dst] = prop(kind,a[src])
@@ -528,8 +531,31 @@ def deepseek(text, key):
     chunks = [text[i:i+16000] for i in range(0,len(text),16000)]
     if len(chunks)>1:
         chunks = [completion(c,'根据播客逐字稿提炼中文要点，保留事实、分歧与关键数字，不补充外部知识。') for c in chunks]
-    output = completion('\n\n'.join(chunks), '将播客内容整理为中文 Markdown 大纲。第一行必须为唯一的 # 总标题，概括整期主题；其余只输出 ##、###、#### 标题，每行一个简短要点，最多60行；忠于原文，不编造。')
-    return output
+    source='\n\n'.join(chunks)
+    instruction='将播客内容整理为中文Markdown大纲。唯一的#总标题为第一层；##主要分支为第二层，每个分支必须有###具体要点第三层，必要时用####第四层。所有叶节点必须在第三或第四层，不跳级，不超过四层。只输出标题行，最多60行；忠于原文，不编造。'
+    for attempt in range(2):
+        output=completion(source,instruction)
+        try:
+            validate_new_outline(output)
+            return output
+        except ValueError as error:
+            if attempt:raise
+            print('DeepSeek: invalid outline hierarchy; one format correction requested',flush=True)
+            instruction+=' 上次层级不合格：'+str(error)+'。请严格修正。'
+
+
+def validate_new_outline(markdown):
+    lines=[line.strip() for line in markdown.splitlines() if line.strip()]
+    headings=[re.fullmatch(r'(#{1,4})\s+(.+)',line) for line in lines]
+    if not lines or not all(headings):raise ValueError('Only # through #### heading lines are allowed')
+    levels=[len(m[1]) for m in headings]
+    if levels[0]!=1 or levels.count(1)!=1:raise ValueError('Exactly one root title is required')
+    if max(levels)<3:raise ValueError('At least three levels are required')
+    if len(lines)>60:raise ValueError('At most 60 headings are allowed')
+    for index,level in enumerate(levels):
+        if index and level>levels[index-1]+1:raise ValueError('Heading levels cannot be skipped')
+        if (index==len(levels)-1 or levels[index+1]<=level) and level<3:
+            raise ValueError('Every branch must reach level three or four')
 
 
 def mermaid(markdown):
@@ -557,6 +583,7 @@ def mermaid(markdown):
 
 
 def run_ai(notion, synced):
+    from ai_state import set_state
     asr_key, llm_key = os.getenv('SILICONFLOW_API_KEY'), os.getenv('DEEPSEEK_API_KEY')
     if not asr_key and not llm_key:
         print('AI disabled: no AI keys configured')
@@ -588,13 +615,14 @@ def run_ai(notion, synced):
                     transcript = transcribe(a['assetUrl'],asr_key,Path(temp))
                 stage = 'save_transcript'
                 notion.section(page['id'],'Apple Podcasts · 逐字稿',transcript)
-                notion.call('PATCH','pages/'+page['id'],{'properties':{'转写指纹':prop('rich_text',fingerprint),'AI状态':prop('rich_text','已转写')}})
+                set_state(notion,page['id'],'已转写',extra={'转写指纹':prop('rich_text',fingerprint)})
+                transcript_done=True
             if llm_key:
                 stage = 'deepseek_outline'
                 outline = deepseek(transcript,llm_key)
                 stage = 'save_markmap'
                 notion.section(page['id'],'Apple Podcasts · 思维导图',outline)
-                notion.call('PATCH','pages/'+page['id'],{'properties':{'脑图指纹':prop('rich_text',map_hash),'AI状态':prop('rich_text','已完成')}})
+                set_state(notion,page['id'],'已完成',extra={'脑图指纹':prop('rich_text',map_hash)})
         except AudioUnavailable as error:
             blocked += 1
             used -= 1  # No AI request was made; do not starve later episodes.
@@ -603,47 +631,28 @@ def run_ai(notion, synced):
             print('Audio unavailable for episode '+row['id']+': '+message,flush=True)
             if os.getenv('GITHUB_ACTIONS') == 'true':
                 print('::warning::Audio unavailable for episode '+row['id']+'; see AI状态 in Notion',flush=True)
-            notion.call('PATCH','pages/'+page['id'],{'properties':{'AI状态':prop('rich_text',message)}})
+            set_state(notion,page['id'],'下载失败',message)
         except Exception as error:
             failures+=1
             message = f'{stage}: {safe_error(error)}'
             print('AI failed for episode '+row['id']+': '+message,flush=True)
-            notion.call('PATCH','pages/'+page['id'],{'properties':{'AI状态':prop('rich_text',message)}})
+            set_state(notion,page['id'],'已转写' if transcript_done else '待处理',message)
     print(f'AI: {used} processed, {blocked} audio unavailable (skipped with warning), {failures} failed')
     return failures
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--check',action='store_true',help='Read-only Apple and Notion schema check')
-    parser.add_argument('--no-ai',action='store_true')
-    args = parser.parse_args()
-    notion = Notion()
-    notion.prepare(not args.check)
-    shows,episodes,saved = fetch_apple()
-    if args.check: return
-    from mindmap_library import ensure_database
-    ensure_database(notion)
-    synced = sync_records(notion,shows,episodes,saved)
+    argparse.ArgumentParser(description='Sync Apple Podcast metadata and listening progress').parse_args()
+    notion=Notion()
+    notion.prepare()
+    shows,episodes,saved=fetch_apple()
+    sync_records(notion,shows,episodes,saved)
     finalize_metadata(notion)
-    from presentation import migrate, saved_outline, set_mindmap
-    for page,row in synced:
-        migrate(notion,page['id'])
-        outline=saved_outline(notion,page['id'])
-        if outline:
-            set_mindmap(notion,page['id'],outline)
-    # Finish verified presentation/schema migration independently of new AI jobs.
-    from mindmap_library import retire_markdown_property
-    retire_markdown_property(notion)
-    failures = 0 if args.no_ai else run_ai(notion,synced)
-    print('Basic sync complete')
-    if failures:
-        raise RuntimeError(f'{failures} AI tasks failed; basic sync is saved. Rerun to resume.')
+    print('Metadata and listening progress sync complete; AI is handled by its own workflow')
 
 
 if __name__=='__main__':
-    try:
-        main()
+    try:main()
     except Exception as error:
         print('Sync failed: '+safe_error(error))
         raise SystemExit(1)

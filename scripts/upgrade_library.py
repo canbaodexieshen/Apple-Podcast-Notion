@@ -6,14 +6,14 @@ from presentation import saved_outline, set_mindmap
 
 def main():
     notion=Notion()
-    notion.prepare(True)
+    notion.prepare()
     ensure_database(notion)
     finalize_metadata(notion)
     count=0
     episodes=list(notion.index('Episode','Eid').values())
     for index,page in enumerate(episodes,1):
         if not (lookup(notion,page['id'],create=False) or text_value(page,'脑图指纹') or
-                'save_markmap' in text_value(page,'AI状态')):
+                'save_markmap' in text_value(page,'AI错误')):
             continue
         print(f'Inspecting saved mindmap {index}/{len(episodes)}',flush=True)
         outline=saved_outline(notion,page['id'])

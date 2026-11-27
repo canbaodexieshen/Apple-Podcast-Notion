@@ -184,14 +184,14 @@ class AITests(unittest.TestCase):
             with self.assertRaises(sync.requests.ReadTimeout):
                 sync.transcribe('https://publisher.example/audio','key',folder)
         self.assertEqual(post.call_count,1)
-    def response(self, reason='stop', content='# 要点'):
+    def response(self, reason='stop', content='# 要点\n## 分支\n### 细节'):
         return Mock(ok=True,json=lambda:{'choices':[{'finish_reason':reason,'message':{'content':content}}],
                                          'usage':{'completion_tokens':100}})
 
     @patch('sync.requests.post')
     def test_deepseek_explicitly_disables_thinking(self, post):
         post.return_value=self.response()
-        self.assertEqual(sync.deepseek('文字','secret'),'# 要点')
+        self.assertEqual(sync.deepseek('文字','secret'),'# 要点\n## 分支\n### 细节')
         payload=post.call_args.kwargs['json']
         self.assertEqual(payload['thinking'],{'type':'disabled'})
         self.assertEqual(payload['max_tokens'],8192)
@@ -245,7 +245,7 @@ class AITests(unittest.TestCase):
         pages=[({'id':i,'properties':{}},episode(i)) for i in ('1','2')]
         self.assertEqual(sync.run_ai(n,pages),0)
         self.assertEqual(transcribe.call_count,2)
-        messages=[sync.text_value({'properties':c.args[2]['properties']},'AI状态') for c in n.call.call_args_list]
+        messages=[sync.text_value({'properties':c.args[2]['properties']},'AI错误') for c in n.call.call_args_list]
         self.assertTrue(any('音源受限' in m for m in messages))
 
     def test_mermaid_escapes_model_syntax(self):
@@ -276,7 +276,8 @@ class AITests(unittest.TestCase):
 
 
 class TransportTests(unittest.TestCase):
-    def test_prepare_never_patches_large_podcast_schema(self):
+    @patch('ai_state.prepare_status')
+    def test_prepare_never_patches_large_podcast_schema(self,status):
         n=object.__new__(sync.Notion)
         n.dbs={'Podcast':'podcast-db','Episode':'episode-db','Author':'author-db'}
         types={
@@ -290,13 +291,11 @@ class TransportTests(unittest.TestCase):
         n.schemas['Episode']['Podcast']['relation']={'database_id':'podcast-db'}
         n.schemas['Episode']['状态']['status']={'options':[{'name':x} for x in ('未听','在听','听过')]}
         n.call=Mock()
-        n.prepare(True)
+        n.prepare()
         self.assertEqual(n.call.call_count,2)
         self.assertEqual(n.call.call_args.args[1],'databases/episode-db')
         self.assertNotIn('演员',n.call.call_args.args[2]['properties'])
-        n.call.reset_mock()
-        n.prepare(False)
-        n.call.assert_not_called()
+
     def test_unrelated_untitled_databases_are_ignored(self):
         n=object.__new__(sync.Notion);n.dbs={}
         n.paginate=lambda _:iter([
