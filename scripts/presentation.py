@@ -66,11 +66,16 @@ def children(notion, block):
 
 
 def find_tabs(notion, page):
+    cache=getattr(notion,'_native_tabs',{})
+    if page in cache:
+        return cache[page]
     for block in children(notion,page):
         if block['type']=='tab':
             labels=children(notion,block['id'])
             if [plain(b) for b in labels]==list(TAB_NAMES):
-                return block, {plain(b):b for b in labels}
+                result=(block, {plain(b):b for b in labels})
+                notion._native_tabs={**cache,page:result}
+                return result
     return None, {}
 
 
@@ -87,6 +92,7 @@ def ensure_tabs(notion,page):
     tabs={plain(b):b for b in children(notion,container['id'])}
     if list(tabs)!=list(TAB_NAMES):
         raise ValueError('Unexpected native tab structure; original content is preserved')
+    notion._native_tabs={**getattr(notion,'_native_tabs',{}),page:(container,tabs)}
     return tabs
 
 
@@ -111,7 +117,10 @@ def replace_tab(notion,tab,new_blocks):
     # then archive the old managed content only after successful attachment.
     if len(old)==len(new_blocks)==1 and old[0]['type']==new_blocks[0]['type']:
         kind=new_blocks[0]['type']
-        notion.call('PATCH','blocks/'+old[0]['id'],{kind:new_blocks[0][kind]})
+        payload=dict(new_blocks[0][kind])
+        if kind in ('audio','embed'):
+            payload.pop('type',None)  # Notion update schemas infer the file source type.
+        notion.call('PATCH','blocks/'+old[0]['id'],{kind:payload})
     else:
         if new_blocks:
             notion.call('PATCH','blocks/'+tab['id']+'/children',{'children':new_blocks})
@@ -120,6 +129,8 @@ def replace_tab(notion,tab,new_blocks):
 
 
 def migrate(notion,page):
+    if page in getattr(notion,'_migrated_pages',set()):
+        return ensure_tabs(notion,page)
     root=children(notion,page)
     tabs=ensure_tabs(notion,page)
     for b in children(notion,tabs['脑图']['id']):
@@ -145,6 +156,7 @@ def migrate(notion,page):
             if c.get('has_children'):
                 raise ValueError('Legacy block has additional notes; preserve it for review')
         notion.call('DELETE','blocks/'+b['id'])
+    notion._migrated_pages=getattr(notion,'_migrated_pages',set())|{page}
     return tabs
 
 

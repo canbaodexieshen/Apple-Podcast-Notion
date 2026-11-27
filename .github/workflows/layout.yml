@@ -32,5 +32,6 @@ jobs:
           cache: npm
       - run: pip install -r requirements.txt
       - run: npm ci && npm run build
-      - run: python -u scripts/sync.py --no-ai
+      - name: Migrate content and correct metadata
+        run: python -u scripts/sync.py --no-ai
       - run: python -u scripts/verify_layout.py

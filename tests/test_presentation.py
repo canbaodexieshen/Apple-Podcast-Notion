@@ -39,6 +39,13 @@ class MemoryNotion:
 
 
 class PresentationTests(unittest.TestCase):
+    def test_audio_update_omits_read_only_type(self):
+        n=MemoryNotion();tabs=p.ensure_tabs(n,'root')
+        block={'type':'audio','audio':{'type':'external','external':{'url':'https://example.test/a.mp3'}}}
+        p.replace_tab(n,tabs['音频'],[block])
+        with patch.object(n,'call',wraps=n.call) as call:
+            p.replace_tab(n,tabs['音频'],[block])
+            self.assertNotIn('type',call.call_args.args[2]['audio'])
     def legacy(self,n,title,text):
         n.add('root',{'type':'toggle','toggle':{'rich_text':sync.rich(title),'children':[p.text_block(text)]}})
     def test_four_native_tabs_are_idempotent(self):
