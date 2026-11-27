@@ -6,6 +6,7 @@ from urllib.parse import urlsplit, unquote
 import requests
 
 TAB_NAMES = ('ShowNotes', '脑图', '语音转文字', '音频')
+RENDER_VERSION = 'markmap-v3'
 LEGACY = {
     'Apple Podcasts · 节目说明': 'ShowNotes',
     'Apple Podcasts · 逐字稿': '语音转文字',
@@ -25,6 +26,28 @@ def text_block(text):
     return {'object':'block','type':'paragraph','paragraph':{'rich_text':rich(text)}}
 
 
+def restore_utf8_outline(value):
+    """Reverse the proven old Latin-1 decoding bug only when lossless Chinese emerges."""
+    import re
+    if re.search(r'[\u4e00-\u9fff]',value):return value
+    try:
+        recovered=value.encode('latin1').decode('utf-8')
+    except UnicodeError:
+        return value
+    return recovered if re.search(r'[\u4e00-\u9fff]',recovered) else value
+
+
+def outline_from_html(content):
+    import re
+    # Notion/S3 sends text/html without charset. requests.text defaults to
+    # ISO-8859-1 for that media type, despite our explicit HTML UTF-8 meta tag.
+    html=content.decode('utf-8-sig',errors='strict')
+    match=re.search(r'<script\b[^>]*id=[\"\']map-data[\"\'][^>]*>(.*?)</script>',html,re.S)
+    if not match:return ''
+    value=json.loads(match[1])
+    return restore_utf8_outline(value) if isinstance(value,str) else ''
+
+
 def markup(outline):
     bundle = Path(__file__).resolve().parents[1]/'web/mindmap.bundle.js'
     if not bundle.exists():
@@ -38,6 +61,7 @@ body{min-height:480px}header{position:absolute;z-index:2;right:12px;top:12px;dis
 button{border:1px solid #ddd;background:#fff;color:inherit;border-radius:7px;padding:6px 10px;cursor:pointer}svg{width:100%;height:100vh;min-height:480px}
 .markmap-foreign div{line-height:1.6}.dark,.dark body{background:#191919;color:#ddd}.dark header{background:#282828dd;border-color:#444}.dark button{background:#333;border-color:#555}
 .dark .markmap-foreign{color:#ddd}.markmap-node{cursor:pointer}footer{position:absolute;bottom:8px;left:14px;font-size:11px;color:#999}
+svg.markmap{--markmap-font:400 16px/1.6 "Noto Sans CJK SC","Microsoft YaHei","PingFang SC",sans-serif}
 </style></head><body><header><button id="out" aria-label="缩小">−</button><button id="in" aria-label="放大">＋</button><button id="fit">适应窗口</button><button id="theme">深浅色</button></header>
 <svg id="map"></svg><footer>点击节点可折叠 · 拖动和缩放查看</footer>
 <script type="application/json" id="map-data">'''+data+'''</script><script>'''+javascript+'''</script></body></html>'''
@@ -49,7 +73,7 @@ def upload_html(notion, outline):
     if len(content)>5*1024*1024:
         raise ValueError('Markmap HTML exceeds 5 MiB safe upload limit')
     headers={**notion.headers,'Notion-Version':'2026-03-11'}
-    fingerprint=hashlib.sha256(('markmap-v2|'+outline).encode()).hexdigest()
+    fingerprint=hashlib.sha256((RENDER_VERSION+'|'+outline).encode()).hexdigest()
     filename='mindmap-'+fingerprint+'.html'
     response=requests.post('https://api.notion.com/v1/file_uploads',headers=headers,
         json={'mode':'single_part','filename':filename,'content_type':'text/html'},timeout=(15,90))
@@ -189,7 +213,8 @@ def legacy_outline(notion,page):
 
 
 def set_mindmap(notion,page,outline):
-    fingerprint=hashlib.sha256(('markmap-v2|'+outline).encode()).hexdigest()
+    outline=restore_utf8_outline(outline)
+    fingerprint=hashlib.sha256((RENDER_VERSION+'|'+outline).encode()).hexdigest()
     # The uploaded filename tracks content without a technical caption in the UI.
     _,tabs=find_tabs(notion,page)
     existing=children(notion,tabs['脑图']['id']) if tabs else []
@@ -214,12 +239,11 @@ def saved_outline(notion,page):
     if record:
         from sync import text_value
         outline=text_value(record,'脑图Markdown')
-        if outline:return outline
+        if outline:return restore_utf8_outline(outline)
     outline=legacy_outline(notion,page)
-    if outline:return outline
+    if outline:return restore_utf8_outline(outline)
     _,tabs=find_tabs(notion,page)
     if not tabs:return ''
-    import re
     for block in children(notion,tabs['脑图']['id']):
         if block['type']!='embed':continue
         url=block['embed'].get('url','')
@@ -232,8 +256,6 @@ def saved_outline(notion,page):
         response=requests.get(url,timeout=(15,90))
         response.raise_for_status()
         if len(response.content)>5*1024*1024:raise ValueError('Saved HTML exceeds safe limit')
-        match=re.search(r'<script\b[^>]*id=[\"\']map-data[\"\'][^>]*>(.*?)</script>',response.text,re.S)
-        if match:
-            value=json.loads(match[1])
-            if isinstance(value,str):return value
+        outline=outline_from_html(response.content)
+        if outline:return outline
     return ''

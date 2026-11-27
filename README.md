@@ -105,4 +105,4 @@ Apple 网页接口为未公开稳定承诺的接口，凭证寿命未确定，�
 
 ## 已有数据升级
 
-在 Actions 手动运行 `Migrate native tabs and metadata`，只同步基础资料和迁移已有内容，不调用转写或DeepSeek。末尾会读回校验四个标签页、图标封面、关联和日期。常规同步同样执行升级逻辑，重复运行不会新增重复标签组。
+在 Actions 手动运行 `Migrate native tabs and metadata`，仅升级已有Notion资料与已保存脑图，不拉取Apple数据，不调用转写或DeepSeek。末尾会读回校验四个标签页、图标封面、关联和日期。常规同步同样执行升级逻辑，重复运行不会新增重复标签组。读取HTML附件时始终从原始字节按UTF-8严格解码，不使用HTTP默认的Latin-1；已有由旧读取逻辑产生的中文乱码可无损恢复。

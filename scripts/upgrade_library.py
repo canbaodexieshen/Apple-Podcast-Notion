@@ -1,6 +1,6 @@
 """Upgrade existing Notion content without Apple login or any paid AI requests."""
-from sync import Notion, finalize_metadata, safe_error
-from mindmap_library import ensure_database
+from sync import Notion, finalize_metadata, safe_error, text_value
+from mindmap_library import ensure_database, lookup
 from presentation import saved_outline, set_mindmap
 
 
@@ -12,6 +12,9 @@ def main():
     count=0
     episodes=list(notion.index('Episode','Eid').values())
     for index,page in enumerate(episodes,1):
+        if not (lookup(notion,page['id'],create=False) or text_value(page,'脑图指纹') or
+                'save_markmap' in text_value(page,'AI状态')):
+            continue
         print(f'Inspecting saved mindmap {index}/{len(episodes)}',flush=True)
         outline=saved_outline(notion,page['id'])
         if outline:

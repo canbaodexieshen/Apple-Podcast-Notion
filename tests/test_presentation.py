@@ -72,7 +72,7 @@ class PresentationTests(unittest.TestCase):
         with self.assertRaises(ValueError):p.set_mindmap(n,'root','# 已有大纲')
         self.assertEqual(p.legacy_outline(n,'root'),'# 已有大纲')
         upload.side_effect=None
-        fingerprint=hashlib.sha256('markmap-v2|# 已有大纲'.encode()).hexdigest()
+        fingerprint=hashlib.sha256((p.RENDER_VERSION+'|# 已有大纲').encode()).hexdigest()
         upload.return_value={'type':'embed','embed':{'url':'https://example.test/mindmap-'+fingerprint+'.html'}}
         p.set_mindmap(n,'root','# 已有大纲')
         self.assertEqual(p.legacy_outline(n,'root'),'')
@@ -94,6 +94,19 @@ class PresentationTests(unittest.TestCase):
         self.assertIn('\\u003c/script\\u003e',html)
         self.assertIn('适应窗口',html)
         self.assertLess(len(html.encode()),5*1024*1024)
+    def test_attachment_decodes_utf8_bytes_even_with_incorrect_http_charset(self):
+        import requests
+        expected='# 美国大选结果与特朗普胜选\n## 中文要点'
+        response=requests.Response()
+        response._content=p.markup(expected).encode('utf-8')
+        response.encoding='ISO-8859-1'
+        self.assertNotIn('美国大选',response.text)  # Reproduces the actual attachment bug.
+        self.assertEqual(p.outline_from_html(response.content),expected)
+    def test_old_mojibake_recovers_losslessly_without_changing_valid_text(self):
+        expected='# 美国大选结果\n## 中文要点'
+        self.assertEqual(p.restore_utf8_outline(expected.encode('utf-8').decode('latin1')),expected)
+        for text in (expected,'# Café français','# plain English'):
+            self.assertEqual(p.restore_utf8_outline(text),text)
 
 
 if __name__=='__main__':unittest.main()
