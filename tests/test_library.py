@@ -110,6 +110,22 @@ class RealRendererTests(unittest.TestCase):
 
 
 class LegacyMergeTests(unittest.TestCase):
+    def test_large_backlink_is_merged_from_small_forward_side(self):
+        n=Mock();n.dbs={'Episode':'e','Podcast':'p'}
+        properties={'Eid':{'id':'eid','type':'rich_text','rich_text':rich('eid')},
+                    'Podcast':{'id':'forward','type':'relation','relation':[{'id':'p1'}]}}
+        a={'id':'a','properties':properties};b={**a,'id':'b'}
+        programme={'id':'p1','properties':{'Episodes':{'id':'reverse','type':'relation',
+            'has_more':True,'relation':[{'id':'b'}]}}}
+        n.paginate.side_effect=[iter([a,b]),iter([]),iter([]),iter([programme]),iter([]),iter([a])]
+        schema={'Episodes':{'type':'relation','relation':{'database_id':'e',
+            'dual_property':{'synced_property_id':'forward'}}}}
+        n.call.side_effect=lambda method,path,body=None: {'properties':schema if path=='databases/p' else {}}
+        with tempfile.TemporaryDirectory() as folder:
+            merge_episodes.merge(n,'eid','a',Path(folder)/'backup.json')
+        self.assertIn(unittest.mock.call('PATCH','pages/b',{'properties':{'Podcast':{'relation':[]}}}),n.call.call_args_list)
+        self.assertFalse(any(c.args[:2]==('PATCH','pages/p1') for c in n.call.call_args_list))
+
     def test_different_notes_are_not_silently_merged(self):
         n=Mock();n.dbs={'Episode':'e'}
         a={'id':'a','properties':{'笔记':{'type':'rich_text','rich_text':rich('我的笔记')}}}

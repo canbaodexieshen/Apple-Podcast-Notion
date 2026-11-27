@@ -2,16 +2,24 @@
 import argparse
 import json
 from pathlib import Path
+from urllib.parse import quote, unquote
 from sync import Notion, text_value, prop, safe_error
 
 
 def signature(page):
-    ignored={'created_time','last_edited_time','formula','rollup','unique_id'}
+    ignored={'created_time','last_edited_time','formula','rollup','unique_id','relation'}
     result={}
     for name,value in page['properties'].items():
         kind=value['type']
         if kind not in ignored:result[name]=(kind,value.get(kind))
     return result
+
+
+def complete_relation(notion,page,field):
+    value=page['properties'][field]
+    if not value.get('has_more'):return value['relation']
+    path='pages/'+page['id']+'/properties/'+quote(unquote(value['id']),safe='')
+    return [item['relation'] for item in notion.paginate(path)]
 
 
 def merge(notion,eid,canonical,backup):
@@ -28,6 +36,16 @@ def merge(notion,eid,canonical,backup):
     if signature(keep)!=signature(duplicate):raise ValueError('Duplicate properties differ; both pages preserved')
     if any(bodies.values()):raise ValueError('Duplicate has body content; both pages preserved for review')
     incoming=[]
+    # Preserve all outgoing relations and use the small forward side of a dual
+    # relation instead of replacing a huge programme -> episodes backlink array.
+    forward={}
+    for field,value in keep['properties'].items():
+        if value['type']!='relation':continue
+        a=complete_relation(notion,keep,field)
+        b=complete_relation(notion,duplicate,field)
+        targets=list(dict.fromkeys(r['id'] for r in a+b))
+        if len(targets)>100:raise ValueError('Outgoing relation exceeds API write limit; both pages preserved')
+        if targets!=[r['id'] for r in a]:forward[field]=prop('relation',[{'id':v} for v in targets])
     for db in notion.dbs.values():
         schema=notion.call('GET','databases/'+db)['properties']
         for field,value in schema.items():
@@ -35,17 +53,34 @@ def merge(notion,eid,canonical,backup):
                 continue
             for page in notion.paginate('databases/'+db+'/query',
                 {'filter':{'property':field,'relation':{'contains':duplicate['id']}}}):
-                if page['properties'][field].get('has_more'):raise ValueError('Relation requires extended pagination; no merge applied')
-                incoming.append({'page':page,'field':field})
+                synced=value['relation'].get('dual_property',{}).get('synced_property_id')
+                mirror=next((key for key,v in duplicate['properties'].items()
+                    if synced and unquote(v['id'])==unquote(synced) and v['type']=='relation'),None)
+                targets=None if mirror else complete_relation(notion,page,field)
+                if targets is not None and len(targets)>100:
+                    raise ValueError('Incoming single relation exceeds API write limit; both pages preserved')
+                incoming.append({'page':page,'field':field,'mirror':mirror,'targets':targets,'database':db})
     if backup.exists():raise ValueError('Backup exists; choose a new path')
     backup.parent.mkdir(parents=True,exist_ok=True)
     backup.write_text(json.dumps({'canonical':keep,'duplicate':duplicate,'bodies':bodies,'incoming':incoming},
         ensure_ascii=False),encoding='utf-8')
+    if forward:notion.call('PATCH','pages/'+keep['id'],{'properties':forward})
+    detached=set()
     for item in incoming:
         page,field=item['page'],item['field']
+        if item['mirror']:
+            mirror=item['mirror']
+            if mirror not in detached:
+                notion.call('PATCH','pages/'+duplicate['id'],{'properties':{mirror:prop('relation',[])}})
+                detached.add(mirror)
+            continue
         values=list(dict.fromkeys(keep['id'] if r['id']==duplicate['id'] else r['id']
-            for r in page['properties'][field]['relation']))
+            for r in item['targets']))
         notion.call('PATCH','pages/'+page['id'],{'properties':{field:prop('relation',[{'id':v} for v in values])}})
+    for item in incoming:
+        remaining=list(notion.paginate('databases/'+item['database']+'/query',
+            {'filter':{'property':item['field'],'relation':{'contains':duplicate['id']}}}))
+        if remaining:raise ValueError('Incoming links remain; duplicate not archived; use backup to inspect')
     # Comments remain attached to the recoverable archived page, never silently removed.
     notion.call('PATCH','pages/'+duplicate['id'],{'archived':True})
     verified=list(notion.paginate('databases/'+notion.dbs['Episode']+'/query',
