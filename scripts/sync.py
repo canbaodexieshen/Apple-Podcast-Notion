@@ -532,7 +532,7 @@ def deepseek(text, key):
     if len(chunks)>1:
         chunks = [completion(c,'根据播客逐字稿提炼中文要点，保留事实、分歧与关键数字，不补充外部知识。') for c in chunks]
     source='\n\n'.join(chunks)
-    instruction='将播客内容整理为中文Markdown大纲。唯一的#总标题为第一层；##主要分支为第二层，每个分支必须有###具体要点第三层，必要时用####第四层。所有叶节点必须在第三或第四层，不跳级，不超过四层。只输出标题行，最多60行；忠于原文，不编造。'
+    instruction='将播客内容整理为中文Markdown大纲。唯一的#总标题为第一层；##主要分支为第二层，每个分支必须有###具体要点第三层，必要时用####第四层。所有叶节点必须在第三或第四层，不跳级，不超过四层。只输出标题行；忠于原文，不编造。'
     for attempt in range(2):
         output=completion(source,instruction)
         try:
@@ -551,7 +551,6 @@ def validate_new_outline(markdown):
     levels=[len(m[1]) for m in headings]
     if levels[0]!=1 or levels.count(1)!=1:raise ValueError('Exactly one root title is required')
     if max(levels)<3:raise ValueError('At least three levels are required')
-    if len(lines)>60:raise ValueError('At most 60 headings are allowed')
     for index,level in enumerate(levels):
         if index and level>levels[index-1]+1:raise ValueError('Heading levels cannot be skipped')
         if (index==len(levels)-1 or levels[index+1]<=level) and level<3:
@@ -567,7 +566,6 @@ def mermaid(markdown):
         if not m:
             continue
         count += 1
-        if count>60: break
         level = len(m[1])
         label = m[2][:100]
         # Numeric entities keep user/model text from becoming Mermaid syntax.

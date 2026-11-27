@@ -38,6 +38,13 @@ class AIStateTests(unittest.TestCase):
 
 
 class NewOutlineTests(unittest.TestCase):
+    @patch('sync.requests.post')
+    def test_large_outline_is_preserved_without_format_retry(self,post):
+        outline='# 总结\n## 分支\n'+'\n'.join(f'### 事实{i}' for i in range(100))
+        post.return_value=Mock(ok=True,json=lambda:{'choices':[{'finish_reason':'stop','message':{'content':outline}}]})
+        self.assertEqual(sync.deepseek('逐字稿','key'),outline)
+        self.assertEqual(post.call_count,1)
+        self.assertIn('事实99',sync.mermaid(outline))
     def test_accepts_three_and_four_levels(self):
         for outline in ('# 总结\n## 分支\n### 具体事实','# 总结\n## 分支\n### 事实\n#### 细节'):
             sync.validate_new_outline(outline)
