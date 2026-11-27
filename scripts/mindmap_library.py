@@ -14,13 +14,13 @@ def ensure_database(notion):
                 '名称':{'title':{}},'思维导图封面':{'files':{}},
                 '播客单集':{'relation':{'database_id':notion.dbs['Episode'],
                     'type':'dual_property','dual_property':{'synced_property_name':'思维导图'}}},
-                '脑图Markdown':{'rich_text':{}},'内容指纹':{'rich_text':{}}}})
+                '内容指纹':{'rich_text':{}}}})
         notion.dbs['思维导图']=result['id']
         notion._map_schema=result['properties']
     if not hasattr(notion,'_map_schema'):
         notion._map_schema=notion.call('GET','databases/'+notion.dbs['思维导图'])['properties']
     for name,kind in {'名称':'title','思维导图封面':'files','播客单集':'relation',
-                      '脑图Markdown':'rich_text','内容指纹':'rich_text'}.items():
+                      '内容指纹':'rich_text'}.items():
         if notion._map_schema.get(name,{}).get('type')!=kind:
             raise ValueError('Existing 思维导图 schema mismatch: '+name)
     target=notion._map_schema['播客单集']['relation']['database_id']
@@ -65,7 +65,7 @@ def outline_tree(markdown):
     nodes=[];stack=[(0,nodes)]
     for level,label in (lines[1:] if lines[0][0]==1 else lines):
         while len(stack)>1 and stack[-1][0]>=level:stack.pop()
-        node={'label':label,'children':[]}
+        node={'label':label,'level':level,'children':[]}
         stack[-1][1].append(node)
         stack.append((level,node['children']))
     return title,nodes
@@ -76,7 +76,8 @@ def append_tree(notion,parent,nodes):
     # Submit one level per call, so the API's nested-block limit is never exceeded.
     for start in range(0,len(nodes),100):
         batch=nodes[start:start+100]
-        blocks=[{'object':'block','type':'toggle','toggle':{'rich_text':rich(node['label'])}} for node in batch]
+        blocks=[{'object':'block','type':heading_kind(node),heading_kind(node):{
+            'rich_text':rich(node['label']),'is_toggleable':True}} for node in batch]
         result=notion.call('PATCH','blocks/'+parent+'/children',{'children':blocks})['results']
         for block,node in zip(result,batch):append_tree(notion,block['id'],node['children'])
 
@@ -85,7 +86,7 @@ def tree_prefix(notion,parent,nodes):
     from presentation import children, plain
     existing=children(notion,parent)
     return len(existing)<=len(nodes) and all(
-        block['type']=='toggle' and plain(block)==node['label'] and
+        block['type']==heading_kind(node) and block[block['type']].get('is_toggleable') and plain(block)==node['label'] and
         tree_prefix(notion,block['id'],node['children'])
         for block,node in zip(existing,nodes))
 
@@ -97,19 +98,39 @@ def resume_tree(notion,parent,nodes):
     append_tree(notion,parent,nodes[len(existing):])
 
 
+def heading_kind(node):
+    return 'heading_'+str(min(4,node['level']))
+
+
+def retire_markdown_property(notion):
+    """Remove the user-requested obsolete field only after every outline is in HTML."""
+    from presentation import library_outline, restore_utf8_outline
+    ensure_database(notion)
+    old=notion._map_schema.get('脑图Markdown')
+    if not old:return
+    for record in notion.paginate('databases/'+notion.dbs['思维导图']+'/query',{}):
+        original=text_value(record,'脑图Markdown')
+        if original and library_outline(notion,record)!=restore_utf8_outline(original):
+            raise ValueError('HTML outline not verified; 脑图Markdown kept to preserve data')
+    notion.call('PATCH','databases/'+notion.dbs['思维导图'],{'properties':{old['id']:None}})
+    notion._map_schema.pop('脑图Markdown',None)
+    for record in getattr(notion,'_map_records',{}).values():
+        record['properties'].pop('脑图Markdown',None)
+    print('Mindmap library: 脑图Markdown removed after complete HTML recovery check',flush=True)
+
+
 def publish(notion,episode,outline,html_block=None):
     from presentation import markup, upload_html, children, plain, replace_tab
     from render_mindmap import screenshot
     title,nodes=outline_tree(outline)
-    content_hash=hashlib.sha256(('library-v1|'+outline).encode()).hexdigest()
+    content_hash=hashlib.sha256(('library-v2-headings|'+outline).encode()).hexdigest()
     record=lookup(notion,episode)
     print('Mindmap library: rendering complete outline and saving private PNG',flush=True)
     # Capture the full expanded map on every sync, even when the AI outline is unchanged.
     png,bounds=screenshot(markup(outline))
     cover=upload_png(notion,png)
     properties={'名称':prop('title',title),'播客单集':prop('relation',[{'id':episode}]),
-                '思维导图封面':{'files':[{'name':'思维导图封面.png',**cover}]},
-                '脑图Markdown':prop('rich_text',outline)}
+                '思维导图封面':{'files':[{'name':'思维导图封面.png',**cover}]}}
     if record:
         record=notion.call('PATCH','pages/'+record['id'],{'properties':properties,'cover':cover})
     else:

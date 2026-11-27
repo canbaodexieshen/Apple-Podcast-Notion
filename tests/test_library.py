@@ -74,7 +74,7 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(nodes[1]['label'],'二')
     def test_interrupted_tree_resumes_without_duplicates(self):
         n=MemoryNotion();_,nodes=lib.outline_tree('# 总结\n## 一\n### 子\n## 二')
-        n.add('root',{'type':'toggle','toggle':{'rich_text':rich('一')}})
+        n.add('root',{'type':'heading_2','heading_2':{'rich_text':rich('一'),'is_toggleable':True}})
         self.assertTrue(lib.tree_prefix(n,'root',nodes))
         lib.resume_tree(n,'root',nodes)
         lib.resume_tree(n,'root',nodes)
@@ -97,9 +97,79 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual([presentation.plain(b) for b in blocks],['脑图','AI大标题'])
         self.assertTrue(all(b[b['type']]['is_toggleable'] for b in blocks))
         self.assertEqual(html.call_count,1)
+        branch=n.contents[blocks[1]['id']][0]
+        self.assertEqual(branch['type'],'heading_2')
+        self.assertTrue(branch['heading_2']['is_toggleable'])
+        self.assertNotIn('脑图Markdown',record['properties'])
+    def test_markdown_property_is_kept_if_html_cannot_recover_it(self):
+        n=Mock();n.dbs={'思维导图':'maps','Episode':'episodes'}
+        n._map_schema={'脑图Markdown':{'id':'md'}}
+        record={'id':'p','properties':{'脑图Markdown':{'type':'rich_text','rich_text':rich('# 唯一大纲')}}}
+        n.paginate.return_value=iter([record])
+        with patch('mindmap_library.ensure_database'),patch('presentation.library_outline',return_value=''):
+            with self.assertRaisesRegex(ValueError,'kept to preserve'):
+                lib.retire_markdown_property(n)
+        n.call.assert_not_called()
+    def test_markdown_property_removal_is_verified_and_idempotent(self):
+        n=Mock();n.dbs={'思维导图':'maps','Episode':'episodes'}
+        n._map_schema={'脑图Markdown':{'id':'md'}}
+        record={'id':'p','properties':{'脑图Markdown':{'type':'rich_text','rich_text':rich('# 已保存大纲')}}}
+        n._map_records={'episode':record}
+        n.paginate.return_value=iter([record])
+        with patch('mindmap_library.ensure_database'),patch('presentation.library_outline',return_value='# 已保存大纲'):
+            lib.retire_markdown_property(n)
+            lib.retire_markdown_property(n)
+        n.call.assert_called_once_with('PATCH','databases/maps',{'properties':{'md':None}})
+        self.assertNotIn('脑图Markdown',record['properties'])
+    def test_heading_levels_are_preserved_including_fourth_level(self):
+        n=MemoryNotion();_,nodes=lib.outline_tree('# 总结\n## 二级\n### 三级\n#### 四级')
+        lib.append_tree(n,'root',nodes)
+        parent='root'
+        for level in (2,3,4):
+            block=n.contents[parent][0]
+            self.assertEqual(block['type'],'heading_'+str(level))
+            self.assertTrue(block[block['type']]['is_toggleable'])
+            parent=block['id']
 
 
 class RealRendererTests(unittest.TestCase):
+    def test_default_view_is_fully_expanded_and_fits_resized_iframe(self):
+        from playwright.sync_api import sync_playwright
+        outline='# 总结\n'+''.join(f'## 分支{i}\n### 中文详细要点{i}\n#### 深层内容{i}\n' for i in range(8))
+        with sync_playwright() as p:
+            channel=os.getenv('MINDMAP_BROWSER_CHANNEL')
+            browser=p.chromium.launch(headless=True,**({'channel':channel} if channel else {}))
+            try:
+                page=browser.new_page(viewport={'width':1100,'height':850})
+                page.set_content(presentation.markup(outline))
+                page.evaluate('window.podcastMindmap.ready')
+                def check():
+                    return page.evaluate('''() => {
+                        const svg=document.getElementById('map').getBoundingClientRect();
+                        const nodes=[...document.querySelectorAll('.markmap-foreign')];
+                        return {nodes:nodes.length,fit:nodes.every(n=>{
+                            const r=n.getBoundingClientRect();
+                            return r.left>=svg.left-1 && r.right<=svg.right+1 && r.top>=svg.top-1 && r.bottom<=svg.bottom+1;
+                        }),height:svg.height};
+                    }''')
+                initial=check()
+                self.assertEqual(initial['nodes'],25)
+                self.assertTrue(initial['fit'])
+                page.set_viewport_size({'width':650,'height':360})
+                page.wait_for_timeout(600)
+                resized=check()
+                self.assertEqual(resized['nodes'],25)
+                self.assertTrue(resized['fit'])
+                self.assertEqual(resized['height'],360)
+                # Notion loads HTML inside tabs/toggles which can start hidden.
+                page.set_content(presentation.markup(outline).replace('<body>','<body style="display:none">'))
+                page.evaluate('window.podcastMindmap.ready')
+                page.evaluate('document.body.style.display="block"')
+                page.wait_for_timeout(700)
+                revealed=check()
+                self.assertEqual(revealed['nodes'],25)
+                self.assertTrue(revealed['fit'])
+            finally:browser.close()
     def test_actual_bundle_expands_all_nodes_and_wraps_long_chinese(self):
         from render_mindmap import screenshot
         outline='# 总结\n'+''.join('## 分支%d\n### %s\n'%(i,'这是需要完整展示的中文要点'*10) for i in range(8))

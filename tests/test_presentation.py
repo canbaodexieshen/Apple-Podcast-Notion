@@ -33,14 +33,21 @@ class MemoryNotion:
             for contents in self.contents.values():contents[:]=[b for b in contents if b['id']!=id]
             return {}
         if path.endswith('/children'):
-            return {'results':[self.add(id,b) for b in body['children']]}
+            inserted=[self.add(id,b) for b in body['children']]
+            position=body.get('position',{})
+            if position.get('type') in ('start','after_block'):
+                current=self.contents[id]
+                current[:]=[b for b in current if b not in inserted]
+                offset=0 if position['type']=='start' else next(i+1 for i,b in enumerate(current) if b['id']==position['after_block']['id'])
+                current[offset:offset]=inserted
+            return {'results':inserted}
         self.nodes[id].update(copy.deepcopy(body))
         return self.nodes[id]
 
 
 class PresentationTests(unittest.TestCase):
     def setUp(self):
-        patcher=patch('mindmap_library.publish');patcher.start();self.addCleanup(patcher.stop)
+        patcher=patch('mindmap_library.publish',return_value={'id':'map-page'});patcher.start();self.addCleanup(patcher.stop)
     def test_audio_update_omits_read_only_type(self):
         n=MemoryNotion();tabs=p.ensure_tabs(n,'root')
         block={'type':'audio','audio':{'type':'external','external':{'url':'https://example.test/a.mp3'}}}
@@ -107,6 +114,26 @@ class PresentationTests(unittest.TestCase):
         self.assertEqual(p.restore_utf8_outline(expected.encode('utf-8').decode('latin1')),expected)
         for text in (expected,'# Café français','# plain English'):
             self.assertEqual(p.restore_utf8_outline(text),text)
+    def test_native_mention_replaces_bare_url_and_preserves_personal_notes(self):
+        n=MemoryNotion();tab=p.ensure_tabs(n,'root')['脑图']
+        n.add(tab['id'],{'type':'embed','embed':{'url':'https://example.test/old.html'}})
+        record='425c37fe-e474-81f7-a4ca-dfcfd1cf348f'
+        n.add(tab['id'],p.text_block('我的个人笔记'))
+        n.add(tab['id'],p.text_block('https://app.notion.com/p/'+record.replace('-','')+'?source=copy_link'))
+        for _ in range(2):
+            p.replace_brain_embed(n,tab,{'type':'embed','embed':{'url':'https://example.test/new.html'}})
+            p.ensure_map_mention(n,tab,record)
+        blocks=n.contents[tab['id']]
+        self.assertEqual(len(blocks),3)
+        self.assertEqual(blocks[1]['paragraph']['rich_text'][0]['mention']['page']['id'],record)
+        self.assertEqual(p.plain(blocks[2]),'我的个人笔记')
+    @patch('presentation.read_embed_outline',return_value='# 从HTML恢复')
+    @patch('mindmap_library.lookup',return_value={'id':'root','properties':{}})
+    def test_outline_recovers_after_markdown_property_is_removed(self,lookup,read):
+        n=MemoryNotion()
+        n.add('root',{'type':'heading_2','heading_2':{'rich_text':sync.rich('脑图'),'is_toggleable':True,
+            'children':[{'type':'embed','embed':{'url':'https://example.test/map.html'}}]}})
+        self.assertEqual(p.saved_outline(n,'episode'),'# 从HTML恢复')
 
 
 if __name__=='__main__':unittest.main()

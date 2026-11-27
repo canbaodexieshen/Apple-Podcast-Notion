@@ -43,7 +43,7 @@ Podcast 不新增字段，通过已有 Pid 的 `apple:` 前缀识别来源；如
 
 下载音源后通过 FFmpeg 切成20分钟、16kHz单声道 WAV，每段约38.4MB，符合硅基流动1小时/50MB限制。默认音源下载上限512MiB，单个托管正文上限15万字符，超过会明确报错而不静默截断。SenseVoiceSmall 返回文字，不提供逐字时间轴或说话人标签保证。专有名词仍可能识别错误。
 
-DeepSeek 对长文本分段提炼，再生成 Markdown 大纲；Markmap 将其渲染为彩色可折叠、缩放和拖动的脑图，支持深浅色切换。脑图文件自包含渲染代码，不依赖外部CDN，上传至Notion HTML区块，在页面权限范围内展示，不通过GitHub Pages公开。Node构建包使用锁定版本，运行前执行 `npm ci && npm run build`。调色板通过Markmap官方`deriveOptions`转换为渲染函数，并用真实浏览器回归测试。
+DeepSeek 对长文本分段提炼，再生成 Markdown 大纲；Markmap 将其渲染为彩色可折叠、缩放和拖动的脑图，默认完全展开并适应窗口，窗口缩小或Notion选项卡从隐藏变为可见后重新适配，支持深浅色切换。脑图文件自包含渲染代码，不依赖外部CDN，上传至Notion HTML区块，在页面权限范围内展示，不通过GitHub Pages公开。Node构建包使用锁定版本，运行前执行 `npm ci && npm run build`。调色板通过Markmap官方`deriveOptions`转换为渲染函数，并用真实浏览器回归测试。
 
 单集正文使用原生 Notion `tab` 区块，顺序固定为 **ShowNotes / 脑图 / 语音转文字 / 音频**。不再显示独立内容大纲或Mermaid。已有自动生成折叠块在内容成功保存后迁移归档；已保存的逐字稿和Markdown大纲会复用，不重新转写或调用DeepSeek。脑图迁移失败时保留原大纲，便于重试。上传 HTML 需要集成具备文件上传能力。
 
@@ -63,9 +63,13 @@ Podcast封面与图标使用节目封面；Episode使用单集封面，缺失时
 
 正式同步会在模板下创建内联数据库“思维导图”，每个已有AI脑图的单集对应一条记录，通过“播客单集”双向关联Episode。“思维导图封面”文件属性和页面封面使用同一份私有PNG；每次同步已有脑图时重新完整展开、截图并更新，不会重复调用AI。
 
-正文第一个区块为可折叠二级标题“脑图”，内嵌自包含HTML；第二个区块为可折叠一级标题，使用DeepSeek大纲的总标题，下面按原Markdown层级生成嵌套折叠要点。保存大纲和内容指纹用于恢复；中断后的层级写入可接续。原有单集四个标签页继续保留。
+正文第一个区块为可折叠二级标题“脑图”，内嵌自包含HTML；第二个区块为可折叠一级标题，使用DeepSeek大纲的总标题，下面按原Markdown级别生成原生可折叠二级、三级、四级标题，保留真实标题语义；不会使用普通toggle代替标题。中断后的层级写入可接续。单集“脑图”标签页的HTML下方添加对应资料库页面的原生page mention，重复同步会复用，不展示裸URL；原有个人笔记保留。
+
+“脑图Markdown”文字属性已取消，原大纲保存在自包含HTML的JSON数据中，使用UTF-8严格读取。迁移会逐条验证HTML能够完整恢复原大纲后才删除旧属性；后续同步不重建该属性。内容指纹继续用于恢复与去重。
 
 截图使用Playwright Chromium，导出前等待字体和布局完成，检查全部节点展开、文本换行及边界无裁切。HTML、PNG均上传Notion，不公开到GitHub Pages。超出安全尺寸或上传上限时明确报错，保留原内容。工作流安装Chromium及中文字体；本机另运行`python -m playwright install chromium`，Windows也可设置环境变量`MINDMAP_BROWSER_CHANNEL=msedge`使用隔离的无头Edge。
+
+`Verify complete podcast sync`工作流用于完整验证：同步全部基础资料，最多处理1集待完成AI任务，读回检查标题层级、原生提及、封面、日期和关联；然后不调用AI再升级一次并复核，验证恢复能力和去重。它需要已配置转写及DeepSeek密钥，正常每日同步仍使用原AI_MAX_EPISODES配置。
 
 `python scripts/upgrade_library.py`只升级现有Notion内容，不需要Apple凭证，也不调用AI。历史单集合并工具`merge_episodes.py`要求明确指定Eid、保留页面ID及备份路径；只接受属性一致、正文为空的已审定重复，迁移可见数据库的引用后软归档，不自动合并冲突笔记。
 

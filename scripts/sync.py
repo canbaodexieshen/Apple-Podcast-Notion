@@ -612,6 +612,9 @@ def main():
         if outline:
             set_mindmap(notion,page['id'],outline)
     failures = 0 if args.no_ai else run_ai(notion,synced)
+    if not failures:
+        from mindmap_library import retire_markdown_property
+        retire_markdown_property(notion)
     print('Basic sync complete')
     if failures:
         raise RuntimeError(f'{failures} AI tasks failed; basic sync is saved. Rerun to resume.')

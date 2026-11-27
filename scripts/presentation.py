@@ -6,7 +6,7 @@ from urllib.parse import urlsplit, unquote
 import requests
 
 TAB_NAMES = ('ShowNotes', '脑图', '语音转文字', '音频')
-RENDER_VERSION = 'markmap-v3'
+RENDER_VERSION = 'markmap-v4'
 LEGACY = {
     'Apple Podcasts · 节目说明': 'ShowNotes',
     'Apple Podcasts · 逐字稿': '语音转文字',
@@ -57,8 +57,8 @@ def markup(outline):
     return '''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>播客脑图</title>
 <style>*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;background:#fff;color:#333;font-family:system-ui,sans-serif}
-body{min-height:480px}header{position:absolute;z-index:2;right:12px;top:12px;display:flex;gap:6px;padding:6px;background:#ffffffdd;border:1px solid #eee;border-radius:12px}
-button{border:1px solid #ddd;background:#fff;color:inherit;border-radius:7px;padding:6px 10px;cursor:pointer}svg{width:100%;height:100vh;min-height:480px}
+body{min-height:0}header{position:absolute;z-index:2;right:12px;top:12px;display:flex;gap:6px;padding:6px;background:#ffffffdd;border:1px solid #eee;border-radius:12px}
+button{border:1px solid #ddd;background:#fff;color:inherit;border-radius:7px;padding:6px 10px;cursor:pointer}svg{width:100%;height:100vh;min-height:0;display:block}
 .markmap-foreign div{line-height:1.6}.dark,.dark body{background:#191919;color:#ddd}.dark header{background:#282828dd;border-color:#444}.dark button{background:#333;border-color:#555}
 .dark .markmap-foreign{color:#ddd}.markmap-node{cursor:pointer}footer{position:absolute;bottom:8px;left:14px;font-size:11px;color:#999}
 svg.markmap{--markmap-font:400 16px/1.6 "Noto Sans CJK SC","Microsoft YaHei","PingFang SC",sans-serif}
@@ -223,13 +223,78 @@ def set_mindmap(notion,page,outline):
     if not reuse:
         tabs=migrate(notion,page)
         block=upload_html(notion,outline)
-        replace_tab(notion,tabs['脑图'],[block])
+        replace_brain_embed(notion,tabs['脑图'],block)
     from mindmap_library import publish
-    publish(notion,page,outline,block)
+    record=publish(notion,page,outline,block)
+    tabs=tabs or migrate(notion,page)
+    ensure_map_mention(notion,tabs['脑图'],record['id'])
     # Remove only known old generated outline/diagram after the Markmap saved.
     for b in children(notion,page):
         if b['type']=='toggle' and plain(b) in ('Apple Podcasts · 内容大纲','Apple Podcasts · 思维导图'):
             notion.call('DELETE','blocks/'+b['id'])
+    return record
+
+
+def replace_brain_embed(notion,tab,new_block):
+    """Update the generated HTML without deleting user notes or native mentions."""
+    existing=children(notion,tab['id'])
+    embeds=[b for b in existing if b['type']=='embed']
+    if embeds:
+        payload=dict(new_block['embed']);payload.pop('type',None)
+        notion.call('PATCH','blocks/'+embeds[0]['id'],{'embed':payload})
+    else:
+        notion.call('PATCH','blocks/'+tab['id']+'/children',{'children':[new_block],'position':{'type':'start'}})
+
+
+def ensure_map_mention(notion,tab,record_id):
+    import re
+    existing=children(notion,tab['id'])
+    identity=record_id.replace('-','')
+    mentions=[];bare_urls=[]
+    for block in existing:
+        if block['type']!='paragraph':continue
+        runs=block['paragraph'].get('rich_text',[])
+        if len(runs)==1 and runs[0].get('type')=='mention':
+            target=runs[0].get('mention',{}).get('page',{}).get('id','')
+            if target.replace('-','')==identity:mentions.append(block)
+        text=plain(block).strip()
+        if re.fullmatch(r'https://(?:app\.)?notion\.(?:com|so)/\S+',text):
+            ids=re.findall(r'[0-9a-f]{32}|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}',text)
+            if any(i.replace('-','')==identity for i in ids):bare_urls.append(block)
+    embed_index=next((i for i,b in enumerate(existing) if b['type']=='embed'),None)
+    if embed_index is None:raise ValueError('Cannot place mindmap mention without a saved HTML block')
+    keep=next((m for m in mentions if embed_index+1<len(existing) and existing[embed_index+1]['id']==m['id']),None)
+    if keep is None:
+        keep=notion.call('PATCH','blocks/'+tab['id']+'/children',{'children':[{
+            'object':'block','type':'paragraph','paragraph':{'rich_text':[{
+                'type':'mention','mention':{'type':'page','page':{'id':record_id}}}]}}],
+            'position':{'type':'after_block','after_block':{'id':existing[embed_index]['id']}}})['results'][0]
+    for old in mentions+bare_urls:
+        if old['id']!=keep['id']:notion.call('DELETE','blocks/'+old['id'])
+
+
+def read_embed_outline(block):
+    if block['type']!='embed':return ''
+    url=block['embed'].get('url','')
+    if not url:return ''
+    host=urlsplit(url).hostname or ''
+    if not (host.endswith('.amazonaws.com') or host.endswith('.notion.so') or
+            host.endswith('.notion-static.com')):
+        return ''
+    # No credentials are sent to signed storage URLs; HTML is strictly UTF-8.
+    response=requests.get(url,timeout=(15,90))
+    response.raise_for_status()
+    if len(response.content)>5*1024*1024:raise ValueError('Saved HTML exceeds safe limit')
+    return outline_from_html(response.content)
+
+
+def library_outline(notion,record):
+    for block in children(notion,record['id']):
+        if block['type']=='heading_2' and plain(block)=='脑图':
+            for embed in children(notion,block['id']):
+                outline=read_embed_outline(embed)
+                if outline:return outline
+    return ''
 
 
 def saved_outline(notion,page):
@@ -237,6 +302,9 @@ def saved_outline(notion,page):
     from mindmap_library import lookup
     record=lookup(notion,page,create=False)
     if record:
+        outline=library_outline(notion,record)
+        if outline:return outline
+        # Transitional fallback only; the field is removed after HTML verification.
         from sync import text_value
         outline=text_value(record,'脑图Markdown')
         if outline:return restore_utf8_outline(outline)
@@ -245,17 +313,6 @@ def saved_outline(notion,page):
     _,tabs=find_tabs(notion,page)
     if not tabs:return ''
     for block in children(notion,tabs['脑图']['id']):
-        if block['type']!='embed':continue
-        url=block['embed'].get('url','')
-        if not url:continue
-        host=urlsplit(url).hostname or ''
-        if not (host.endswith('.amazonaws.com') or host.endswith('.notion.so') or
-                host.endswith('.notion-static.com') or host=='prod-files-secure.s3.us-west-2.amazonaws.com'):
-            continue
-        # No credentials are sent to signed Notion storage URLs.
-        response=requests.get(url,timeout=(15,90))
-        response.raise_for_status()
-        if len(response.content)>5*1024*1024:raise ValueError('Saved HTML exceeds safe limit')
-        outline=outline_from_html(response.content)
+        outline=read_embed_outline(block)
         if outline:return outline
     return ''
